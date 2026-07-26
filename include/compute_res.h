@@ -7,7 +7,7 @@ typedef struct {
     float emissionStrength;
     float smoothness;
     float specularProbability;
-    float _pad[1]; // HLSL rounds StructuredBuffer element stride up to a multiple of 16 because of the float4 members; this keeps the CPU struct's size (and therefore materials[i] offsets) matching the GPU's.
+    float noise;
 } Material;
 
 typedef struct {

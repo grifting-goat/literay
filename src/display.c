@@ -1,4 +1,5 @@
 #include "display.h"
+#include "world.h"
 
 #include "stb_image.h"
 #include <string.h>
@@ -40,6 +41,9 @@ void createComputeDescriptorSet(Window_t* window);
 void createCommandBuffers(Window_t* window);
 
 void createSyncResources(Window_t* window);
+
+static void destroyVkBuffer(VkDevice device, Vk_Buffer_t* buf);
+static void destroyVkImage(VkDevice device, Vk_Image_t* img);
 
 
 
@@ -364,6 +368,113 @@ void window_render(Window_t* window, Camera* cam) {
 	if (present_result == VK_ERROR_OUT_OF_DATE_KHR || present_result == VK_SUBOPTIMAL_KHR) {
 		printf("swapchain out of date/suboptimal on present\n");
 	}
+}
+
+static void destroyVkBuffer(VkDevice device, Vk_Buffer_t* buf) {
+	if (buf->mapped != NULL) {
+		vkUnmapMemory(device, buf->bufferMemory);
+	}
+	if (buf->buffer != VK_NULL_HANDLE) {
+		vkDestroyBuffer(device, buf->buffer, NULL);
+	}
+	if (buf->bufferMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, buf->bufferMemory, NULL);
+	}
+	*buf = (Vk_Buffer_t){0};
+}
+
+static void destroyVkImage(VkDevice device, Vk_Image_t* img) {
+	if (img->outputImageView != VK_NULL_HANDLE) {
+		vkDestroyImageView(device, img->outputImageView, NULL);
+	}
+	if (img->outputImage != VK_NULL_HANDLE) {
+		vkDestroyImage(device, img->outputImage, NULL);
+	}
+	if (img->outputImageMemory != VK_NULL_HANDLE) {
+		vkFreeMemory(device, img->outputImageMemory, NULL);
+	}
+	*img = (Vk_Image_t){0};
+}
+
+void window_close(Window_t* window) {
+	Vk_Objects_t* vk = &window->vk_objects;
+
+	if (vk->device != VK_NULL_HANDLE) {
+		vkDeviceWaitIdle(vk->device);
+	}
+
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		FrameResources_t* res = &vk->frameResources[i];
+		if (res->commandPool != VK_NULL_HANDLE) {
+			vkDestroyCommandPool(vk->device, res->commandPool, NULL); // also frees its commandBuffer
+		}
+		if (res->imageAcquiredSemaphore != VK_NULL_HANDLE) {
+			vkDestroySemaphore(vk->device, res->imageAcquiredSemaphore, NULL);
+		}
+	}
+
+	if (vk->timelineSemaphore != VK_NULL_HANDLE) {
+		vkDestroySemaphore(vk->device, vk->timelineSemaphore, NULL);
+	}
+	if (vk->computeTimelineSemaphore != VK_NULL_HANDLE) {
+		vkDestroySemaphore(vk->device, vk->computeTimelineSemaphore, NULL);
+	}
+
+	// descriptor pool destruction also frees the descriptor sets allocated from it
+	if (vk->computeDescriptorPool != VK_NULL_HANDLE) {
+		vkDestroyDescriptorPool(vk->device, vk->computeDescriptorPool, NULL);
+	}
+	if (vk->computeDescriptorSetLayout != VK_NULL_HANDLE) {
+		vkDestroyDescriptorSetLayout(vk->device, vk->computeDescriptorSetLayout, NULL);
+	}
+
+	if (vk->computePipeline.handle != VK_NULL_HANDLE) {
+		vkDestroyPipeline(vk->device, vk->computePipeline.handle, NULL);
+	}
+	if (vk->computePipeline.layout != VK_NULL_HANDLE) {
+		vkDestroyPipelineLayout(vk->device, vk->computePipeline.layout, NULL);
+	}
+
+	destroyVkBuffer(vk->device, &vk->worldGridBuffer);
+	destroyVkBuffer(vk->device, &vk->worldGridMaskBuffer);
+	destroyVkBuffer(vk->device, &vk->materialProperitesBuffer);
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		destroyVkBuffer(vk->device, &vk->cameraDataBuffer[i]);
+	}
+
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		destroyVkImage(vk->device, &vk->outputImageRes[i]);
+	}
+	destroyVkImage(vk->device, &vk->accumImageRes);
+
+	// swapchainImages is owned by the swapchain itself, only the handle array needs freeing
+	for (uint32_t i = 0; i < vk->swapchain_data.swapchainImageCount; i++) {
+		if (vk->swapchain_data.renderCompleteSemaphores[i] != VK_NULL_HANDLE) {
+			vkDestroySemaphore(vk->device, vk->swapchain_data.renderCompleteSemaphores[i], NULL);
+		}
+	}
+	free(vk->swapchain_data.renderCompleteSemaphores);
+	free(vk->swapchain_data.swapchainImages);
+	if (vk->swapchain_data.swapchain != VK_NULL_HANDLE) {
+		vkDestroySwapchainKHR(vk->device, vk->swapchain_data.swapchain, NULL);
+	}
+
+	if (vk->device != VK_NULL_HANDLE) {
+		vkDestroyDevice(vk->device, NULL);
+	}
+	if (vk->surface != VK_NULL_HANDLE) {
+		vkDestroySurfaceKHR(vk->vulkanInstance, vk->surface, NULL);
+	}
+	if (vk->vulkanInstance != VK_NULL_HANDLE) {
+		vkDestroyInstance(vk->vulkanInstance, NULL);
+	}
+
+	if (window->glfw_window != NULL) {
+		glfwDestroyWindow(window->glfw_window);
+	}
+	glfwTerminate();
+
+	*window = (Window_t){0};
 }
 
 bool window_should_close(Window_t* window) {
@@ -1054,111 +1165,11 @@ void createComputeBuffers(Window_t* window) {
 }
 
 
-static double perlin_fade(double t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
-static double perlin_lerp(double t, double a, double b) { return a + t * (b - a); }
-static double perlin_grad(int hash, double x, double y) {
-	int h = hash & 7;
-	double u = h < 4 ? x : y;
-	double v = h < 4 ? y : x;
-	return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
-}
-
-
-void generate_terrain_heightmap(Window_t* window) {
-	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
-
-	int perm[256];
-	for (int i = 0; i < 256; i++) { perm[i] = i; }
-	unsigned int seed = 1337u;
-	for (int i = 255; i > 0; i--) {
-		seed = seed * 1664525u + 1013904223u;
-		int j = (int)(seed % (unsigned int)(i + 1));
-		int tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
-	}
-
-	double baseScale = 0.005;
-	double amplitude = (double)VOXEL_GRID_DIM / 10.0;
-	int octaves = 6;
-
-	for (uint32_t z = 0; z < VOXEL_GRID_DIM; z++) {
-		for (uint32_t x = 0; x < VOXEL_GRID_DIM; x++) {
-
-			double nx = (double)x * baseScale;
-			double nz = (double)z * baseScale;
-
-			double total = 0.0;
-			double freq = 1.0;
-			double amp = 1.0;
-			double maxAmp = 0.0;
-
-			for (int octave = 0; octave < octaves; octave++) {
-				double px = nx * freq;
-				double pz = nz * freq;
-
-				int xi = (int)floor(px);
-				int zi = (int)floor(pz);
-				int X = xi & 255;
-				int Z = zi & 255;
-				int X1 = (X + 1) & 255;
-				int Z1 = (Z + 1) & 255;
-				double xf = px - (double)xi;
-				double zf = pz - (double)zi;
-				double u = perlin_fade(xf);
-				double v = perlin_fade(zf);
-
-				int aa = perm[(perm[X] + Z) & 255];
-				int ba = perm[(perm[X1] + Z) & 255];
-				int ab = perm[(perm[X] + Z1) & 255];
-				int bb = perm[(perm[X1] + Z1) & 255];
-
-				double x1 = perlin_lerp(u, perlin_grad(aa, xf, zf), perlin_grad(ba, xf - 1.0, zf));
-				double x2 = perlin_lerp(u, perlin_grad(ab, xf, zf - 1.0), perlin_grad(bb, xf - 1.0, zf - 1.0));
-				double n = perlin_lerp(v, x1, x2);
-
-				total += n * amp;
-				maxAmp += amp;
-				freq *= 2.0;
-				amp *= 0.5;
-			}
-
-			double noiseValue = total / maxAmp; // roughly [-1, 1]
-
-			int height = (int)((double)(VOXEL_GRID_DIM / 2) + noiseValue * amplitude);
-			if (height < 1) { height = 1; }
-			if (height >= (int)VOXEL_GRID_DIM) { height = (int)VOXEL_GRID_DIM - 1; }
-
-			for (int y = 0; y < height; y++) {
-				uint32_t idx = x + (uint32_t)y * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-				voxels[idx] = 7; // brown, fills down to the bottom of the grid
-			}
-
-			uint32_t topIdx = x + (uint32_t)height * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-			voxels[topIdx] = 6; // green, top block of the column
-		}
-	}
-}
-
-void window_world_buffer_load(Window_t* window) {
+void window_world_buffer_load(Window_t* window, World* wrld) {
 	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
 	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
-	memset(voxels, 0, world_grid_size);
 
-	generate_terrain_heightmap(window);
-
-	// horizontal mirror slab, centered in x/z, floating above the terrain
-	uint32_t slabY = (uint32_t)(VOXEL_GRID_DIM * 0.65);
-	uint32_t slabSize = VOXEL_GRID_DIM / 8;
-	uint32_t slabStart = (VOXEL_GRID_DIM - slabSize) / 2;
-	for (uint32_t sz = 0; sz < slabSize; sz++) {
-		for (uint32_t sx = 0; sx < slabSize; sx++) {
-			uint32_t x = slabStart + sx;
-			uint32_t z = slabStart + sz;
-			uint32_t idx = x + slabY * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-			voxels[idx] = 4;
-		}
-	}
-	uint32_t idx = (VOXEL_GRID_DIM / 2) + (VOXEL_GRID_DIM * 0.6) * VOXEL_GRID_DIM + (VOXEL_GRID_DIM / 2) * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-	voxels[idx] = 8;
+	memcpy(voxels, wrld->voxels, world_grid_size);
 
 	uint8_t* mask = (uint8_t*)window->vk_objects.worldGridMaskBuffer.mapped;
 	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
@@ -1186,77 +1197,21 @@ void window_world_buffer_load(Window_t* window) {
 		}
 	}
 
+}
+
+void window_material_buffer_load(Window_t* window, Material* mat_list) {
+
 	Material* materials = (Material*)window->vk_objects.materialProperitesBuffer.mapped;
 
-	materials[1].color[0] = 1.0f;
-	materials[1].color[1] = 0.0f;
-	materials[1].color[2] = 0.0f;
-	materials[1].color[3] = 1.0f;
-
-	materials[2].color[0] = 0.0f;
-	materials[2].color[1] = 1.0f;
-	materials[2].color[2] = 0.0f;
-	materials[2].color[3] = 1.0f;
-
-	materials[3].color[0] = 0.0f;
-	materials[3].color[1] = 0.0f;
-	materials[3].color[2] = 1.0f;
-	materials[3].color[3] = 1.0f;
-
-	//mirrors
-	materials[4].color[0] = 1.0f;
-	materials[4].color[1] = 1.0f;
-	materials[4].color[2] = 1.0f;
-	materials[4].color[3] = 1.0f;
-
-	materials[5].color[0] = 1.0f;
-	materials[5].color[1] = 1.0f;
-	materials[5].color[2] = 1.0f;
-	materials[5].color[3] = 1.0f;
-
-	//grass green
-	materials[6].color[0] = 0.016f;
-	materials[6].color[1] = 0.561f;
-	materials[6].color[2] = 0.008f;
-	materials[6].color[3] = 1.0f;
-
-	//brown
-	materials[7].color[0] = 0.451f;
-	materials[7].color[1] = 0.235f;
-	materials[7].color[2] = 0.004f;
-	materials[7].color[3] = 1.0f;
-
-	//light
-	materials[8].color[0] = 1.0f;
-	materials[8].color[1] = 1.0f;
-	materials[8].color[2] = 0.0f;
-	materials[8].color[3] = 1.0f;
-
-	for (uint32_t i = 1; i <= 8; i++) {
-		materials[i].emissionColor[0] = materials[i].color[0];
-		materials[i].emissionColor[1] = materials[i].color[1];
-		materials[i].emissionColor[2] = materials[i].color[2];
-		materials[i].emissionColor[3] = materials[i].color[3];
-		materials[i].emissionStrength = 0.0f;
-		materials[i].smoothness = 0.0f;
-		materials[i].specularProbability = 0.0f;
-	}
-
-	materials[5].emissionStrength = 10.0f;
-	materials[8].emissionStrength = 10.0f;
-
-	materials[4].smoothness = 1.0f;
-	materials[4].specularProbability = 1.0f;
-
-	materials[7].specularProbability = 1.0f;
-	materials[7].smoothness = 0.4f;
-
-	for (uint32_t i = 1; i <= 8; i++) {
-		for (int k = 0; k < 4; k++) {
-			materials[i].emissionColor[k] *= materials[i].emissionStrength;
+	for (uint32_t i = 0; i < 0xFF; i++) {
+		materials[i] = mat_list[i];
+		for (uint32_t k = 0; k < 4; k++) {
+			materials[i].emissionColor[k] *= materials[i].emissionStrength; //precomp this to gain an fps maybe
 		}
 	}
+
 }
+
 
 
 void createComputeDescriptorSet(Window_t* window) {

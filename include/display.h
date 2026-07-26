@@ -8,6 +8,7 @@
 #include "GLFW/glfw3.h"
 
 #include "camera.h"
+#include "world.h"
 
 
 // Configuration constants
@@ -117,7 +118,9 @@ void window_attach_device(Window_t* window);
 
 void window_render(Window_t* window, Camera* cam);
 
-void window_world_buffer_load(Window_t* window);
+void window_world_buffer_load(Window_t* window, World* wrld);
+
+void window_material_buffer_load(Window_t* window, Material* mat_list);
 
 void window_close(Window_t* window);
 

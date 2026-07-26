@@ -14,6 +14,9 @@
 
 #include "camera.h"
 #include "display.h"
+#include "material.h" //material_list
+
+#include "world.h"
 
 
 int main() {
@@ -24,8 +27,14 @@ int main() {
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
+
+	Vector_t wrld_dim = vector_create((float)VOXEL_GRID_DIM, (float)VOXEL_GRID_DIM, (float)VOXEL_GRID_DIM);
+	World wrld = world_create(wrld_dim);
+	world_generate_terrain(&wrld);
+
     window_attach_device(&window);
-    window_world_buffer_load(&window);
+    window_world_buffer_load(&window, &wrld);
+	window_material_buffer_load(&window, material_list);
 
     glfwSetInputMode(window.glfw_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	double lastMouseX = 0.0, lastMouseY = 0.0;
@@ -84,5 +93,6 @@ int main() {
 
     }
 
-
+    window_close(&window);
+    free(wrld.voxels);
 }

@@ -7,6 +7,7 @@ struct Material {
     float emissionStrength;
     float smoothness;
     float specularProbability;
+    float noise;
 };
 [[vk::binding(2, 0)]] StructuredBuffer<Material> materials;
 
@@ -79,6 +80,12 @@ uint NextRandom(inout uint state) {
 
 float RandomValue(inout uint state) {
     return NextRandom(state) * 2.3283064365386963e-10f; // 1 / 2^32
+}
+
+
+uint HashVoxelCell(int3 cell) {
+    uint seed = uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u;
+    return NextRandom(seed);
 }
 
 // Uniform direction on the unit sphere (already normalized)
@@ -169,7 +176,7 @@ Hit CastRay(Ray ray) {
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
     float3 tFarPerAxis = max(-ray.origin * invDir, (float3(pc._voxel_grid_size) - ray.origin) * invDir);
-    float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.001f;
+    float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.01f;
 
     int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
     int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
@@ -192,7 +199,10 @@ Hit CastRay(Ray ray) {
     while (blockTCurrent < tExit) {
 
         if (IsBlockSolid(uint(blockIndex))) {
-            float blockExit = min(min(blockTMax.x, blockTMax.y), min(blockTMax.z, tExit));
+            // +0.01f only on the block boundary (blockTMax/tMax round independently and can
+            // disagree); never on tExit, or the unbounded inner loop below reads past the grid
+            float blockBoundary = min(min(blockTMax.x, blockTMax.y), blockTMax.z) + 0.01f;
+            float blockExit = min(blockBoundary, tExit);
 
             while (tCurrent < blockExit) {
                 hit.mat_type = ReadVoxel(uint(voxelIndex));
@@ -216,11 +226,7 @@ Hit CastRay(Ray ray) {
         blockTMax += blockMask * blockTDelta;
         normal = -blockMask * float3(istep);
 
-        // resync fine state at the block we just entered. bail out the moment the resolved
-        // cell is out of range instead of trusting blockTCurrent < tExit alone - floating-point
-        // drift over many block steps can let tExit's timing lag behind the true cell position,
-        // which previously meant ReadVoxel/IsBlockSolid could run on a wildly out-of-bounds index
-        float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.0001f);
+        float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
         cell = int3(floor(pos));
         if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
             break;
@@ -267,10 +273,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             if (hit.mat_type != 0) {
                 Material mat = materials[hit.mat_type];
 
-                r.color *= mat.color.rgb;
+                int3 hitCell = int3(floor(hit.end - hit.normal * 0.5f));
+                uint noiseState = HashVoxelCell(hitCell);
+                float3 colorNoise = float3(RandomValue(noiseState), RandomValue(noiseState), RandomValue(noiseState)) - 0.5f;
+                float3 noisyColor = saturate(mat.color.rgb + colorNoise * mat.noise);
+
+                r.color *= noisyColor;
                 r.incomingLight += mat.emissionColor.rgb * r.color; // emissionColor arrives premultiplied by emissionStrength
 
-                r.origin = hit.end + hit.normal * 0.001f;
+                r.origin = hit.end + hit.normal * 0.01f;
 
                 bool isSpecular = mat.specularProbability >= RandomValue(rngState);
                 bonus |= (uint)isSpecular;
@@ -289,7 +300,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         }
 
         totalLight += r.incomingLight;
+        
     }
+
+    
 
     float3 newSample = totalLight / float(RAYS_PER_PIXEL);
 
