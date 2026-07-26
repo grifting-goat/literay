@@ -21,6 +21,7 @@ void createDevice(Window_t* window);
 void chooseBestPhysicalDevice(Window_t* window);
 
 void createOutputImage(Window_t* window);
+void createAccumImage(Window_t* window);
 
 uint32_t findMemoryTypeIndex(Window_t* window, uint32_t typeBits, VkMemoryPropertyFlags required);
 
@@ -71,6 +72,7 @@ void window_attach_device(Window_t* window) {
     createDevice(window);
 
 	createOutputImage(window);
+	createAccumImage(window);
 	createSwapchain(window);
 
 	createComputeShader(window);
@@ -82,7 +84,38 @@ void window_attach_device(Window_t* window) {
 	createCommandBuffers(window);
 }
 
-void window_render(Window_t* window) {
+void window_camera_buffer_update(Window_t* window, Camera* c, uint32_t frame_res_index) {
+	CameraData* ubo = (CameraData*)window->vk_objects.cameraDataBuffer[frame_res_index].mapped;
+
+	bool cameraMoved = camera_check_moved(c);
+	window->vk_objects.accumCount = cameraMoved ? 1 : window->vk_objects.accumCount + 1;
+
+	ubo->camera_position[0] = c->pos.x;
+	ubo->camera_position[1] = c->pos.y;
+	ubo->camera_position[2] = c->pos.z;
+
+	float pitch = c->angle.x;
+	float yaw = c->angle.y;
+
+	float fwd[3] = { -sinf(yaw) * cosf(pitch), -sinf(pitch), cosf(yaw) * cosf(pitch) };
+	float right[3] = { -cosf(yaw), 0.0f, -sinf(yaw) };
+	float up[3] = {
+		right[1] * fwd[2] - right[2] * fwd[1],
+		right[2] * fwd[0] - right[0] * fwd[2],
+		right[0] * fwd[1] - right[1] * fwd[0]
+	};
+
+	for (int i = 0; i < 3; i++) {
+		ubo->camera_forward[i] = fwd[i];
+		ubo->camera_right[i] = right[i];
+		ubo->camera_up[i] = up[i];
+	}
+
+	ubo->tan_fov_v = tanf(c->fov_v);
+	ubo->tan_fov_h = tanf(c->fov_h);
+}
+
+void window_render(Window_t* window, Camera* cam) {
 	static uint64_t timeline_value = 0;
 
 
@@ -99,6 +132,11 @@ void window_render(Window_t* window) {
 	wait_info.pSemaphores=&window->vk_objects.timelineSemaphore;
 	wait_info.pValues=&wait_for_id;
 	vkWaitSemaphores(window->vk_objects.device, &wait_info, UINT64_MAX);
+
+	//only safe to write cameraDataBuffer[frame_res_index] once the wait above confirms the GPU is
+	//done reading it from frame (frame_id - MAX_FRAMES_IN_FLIGHT); writing it any earlier (e.g. from
+	//the main loop before calling window_render) races the GPU still reading that same slot
+	window_camera_buffer_update(window, cam, frame_res_index);
 
 	vkResetCommandPool(window->vk_objects.device, res->commandPool, 0);
 
@@ -132,10 +170,32 @@ void window_render(Window_t* window) {
 	to_general_barrier.subresourceRange.baseArrayLayer=0;
 	to_general_barrier.subresourceRange.layerCount=1;
 
+	//accumImage is persistent (unlike outputImageRes, never discarded/UNDEFINED after frame 1) so the
+	//compute shader can read back last frame's running average; the cross-frame semaphore wait below is
+	//what actually makes last frame's write visible here, this barrier just states the access pattern
+	VkImageMemoryBarrier2 accum_barrier={0};
+	accum_barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+	accum_barrier.srcStageMask= frame_id == 1 ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+	accum_barrier.srcAccessMask= frame_id == 1 ? 0 : VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+	accum_barrier.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+	accum_barrier.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+	accum_barrier.oldLayout= frame_id == 1 ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL;
+	accum_barrier.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+	accum_barrier.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+	accum_barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+	accum_barrier.image=window->vk_objects.accumImageRes.outputImage;
+	accum_barrier.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
+	accum_barrier.subresourceRange.baseMipLevel=0;
+	accum_barrier.subresourceRange.levelCount=1;
+	accum_barrier.subresourceRange.baseArrayLayer=0;
+	accum_barrier.subresourceRange.layerCount=1;
+
+	VkImageMemoryBarrier2 pre_dispatch_barriers[2] = { to_general_barrier, accum_barrier };
+
 	VkDependencyInfo pre_dispatch_dep_info={0};
 	pre_dispatch_dep_info.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-	pre_dispatch_dep_info.imageMemoryBarrierCount=1;
-	pre_dispatch_dep_info.pImageMemoryBarriers=&to_general_barrier;
+	pre_dispatch_dep_info.imageMemoryBarrierCount=2;
+	pre_dispatch_dep_info.pImageMemoryBarriers=pre_dispatch_barriers;
 	vkCmdPipelineBarrier2(res->commandBuffer, &pre_dispatch_dep_info);
 
 	vkCmdBindPipeline(res->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, window->vk_objects.computePipeline.handle);
@@ -144,12 +204,11 @@ void window_render(Window_t* window) {
 	PushConstants push_constants = {0};
 	push_constants._screen_size[0] = (int)window->vk_objects.swapchain_data.swapchainWidth;
 	push_constants._screen_size[1] = (int)window->vk_objects.swapchain_data.swapchainHeight;
-	push_constants.pixel_count = push_constants._screen_size[0] * push_constants._screen_size[1];
 	push_constants._voxel_grid_size[0] = (int)VOXEL_GRID_DIM;
 	push_constants._voxel_grid_size[1] = (int)VOXEL_GRID_DIM;
 	push_constants._voxel_grid_size[2] = (int)VOXEL_GRID_DIM;
-	push_constants.voxelCount = VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
 	push_constants.frame_idx = (unsigned int)frame_id;
+	push_constants.accumCount = window->vk_objects.accumCount;
 	vkCmdPushConstants(res->commandBuffer, window->vk_objects.computePipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &push_constants);
 
 	uint32_t group_count_x = (window->vk_objects.swapchain_data.swapchainWidth + 7) / 8;
@@ -246,12 +305,22 @@ void window_render(Window_t* window) {
 
 	vkEndCommandBuffer(res->commandBuffer);
 
-	VkSemaphoreSubmitInfo wait_semaphore_info={0};
-	wait_semaphore_info.sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-	wait_semaphore_info.semaphore=res->imageAcquiredSemaphore;
-	wait_semaphore_info.stageMask=VK_PIPELINE_STAGE_2_BLIT_BIT;
+	//two waits: swapchain image acquisition (existing), and the previous frame's own *compute* completion
+	//(dedicated semaphore, not the frame-completion one) so this frame's dispatch can't start reading/writing
+	//accumImage before that frame's write lands, without also stalling on the previous frame's blit/present
+	uint64_t prev_frame_id = frame_id > 1 ? frame_id - 1 : 0;
 
-	VkSemaphoreSubmitInfo signal_semaphore_infos[2];
+	VkSemaphoreSubmitInfo wait_semaphore_infos[2]={0};
+	wait_semaphore_infos[0].sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+	wait_semaphore_infos[0].semaphore=res->imageAcquiredSemaphore;
+	wait_semaphore_infos[0].stageMask=VK_PIPELINE_STAGE_2_BLIT_BIT;
+
+	wait_semaphore_infos[1].sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+	wait_semaphore_infos[1].semaphore=window->vk_objects.computeTimelineSemaphore;
+	wait_semaphore_infos[1].value=prev_frame_id;
+	wait_semaphore_infos[1].stageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+	VkSemaphoreSubmitInfo signal_semaphore_infos[3];
 	signal_semaphore_infos[0].sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
 	signal_semaphore_infos[0].pNext=NULL;
 	signal_semaphore_infos[0].semaphore=window->vk_objects.swapchain_data.renderCompleteSemaphores[image_index];
@@ -266,17 +335,24 @@ void window_render(Window_t* window) {
 	signal_semaphore_infos[1].stageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 	signal_semaphore_infos[1].deviceIndex=0;
 
+	signal_semaphore_infos[2].sType=VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+	signal_semaphore_infos[2].pNext=NULL;
+	signal_semaphore_infos[2].semaphore=window->vk_objects.computeTimelineSemaphore;
+	signal_semaphore_infos[2].value=frame_id;
+	signal_semaphore_infos[2].stageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+	signal_semaphore_infos[2].deviceIndex=0;
+
 	VkCommandBufferSubmitInfo cmd_submit_info={0};
 	cmd_submit_info.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
 	cmd_submit_info.commandBuffer=res->commandBuffer;
 
 	VkSubmitInfo2 submit_info={0};
 	submit_info.sType=VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
-	submit_info.waitSemaphoreInfoCount=1;
-	submit_info.pWaitSemaphoreInfos=&wait_semaphore_info;
+	submit_info.waitSemaphoreInfoCount=2;
+	submit_info.pWaitSemaphoreInfos=wait_semaphore_infos;
 	submit_info.commandBufferInfoCount=1;
 	submit_info.pCommandBufferInfos=&cmd_submit_info;
-	submit_info.signalSemaphoreInfoCount=2;
+	submit_info.signalSemaphoreInfoCount=3;
 	submit_info.pSignalSemaphoreInfos=signal_semaphore_infos;
 
 	vkQueueSubmit2(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
@@ -308,7 +384,7 @@ void window_poll_events(Window_t* window) {
 void glfw_app_window_create(Window_t* window) {
 
     window->glfw_window = glfwCreateWindow(window->width,window->height,window->window_name,NULL,NULL);
-    
+
     int monitorX, monitorY;
 	glfwGetMonitorPos(glfwGetPrimaryMonitor(), &monitorX, &monitorY);
 	glfwSetWindowPos(window->glfw_window, monitorX, monitorY);
@@ -627,6 +703,64 @@ void createOutputImage(Window_t* window) {
 }
 
 
+// single persistent image (not double-buffered like outputImageRes) so it can hold a running
+// average across frames; high-precision float format since it accumulates many samples over time
+void createAccumImage(Window_t* window) {
+
+	VkImageCreateInfo image_create_info = {0};
+	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	image_create_info.imageType = VK_IMAGE_TYPE_2D;
+	image_create_info.format = ACCUM_IMAGE_FORMAT;
+	image_create_info.extent.width = window->width;
+	image_create_info.extent.height = window->height;
+	image_create_info.extent.depth = 1;
+	image_create_info.mipLevels = 1;
+	image_create_info.arrayLayers = 1;
+	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	image_create_info.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &window->vk_objects.accumImageRes.outputImage) != VK_SUCCESS) {
+		printf("failed to create accumulation image.\n");
+		return;
+	}
+
+	VkMemoryRequirements mem_reqs;
+	vkGetImageMemoryRequirements(window->vk_objects.device, window->vk_objects.accumImageRes.outputImage, &mem_reqs);
+
+	VkMemoryAllocateInfo alloc_info = {0};
+	alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	alloc_info.allocationSize = mem_reqs.size;
+	alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &window->vk_objects.accumImageRes.outputImageMemory) != VK_SUCCESS) {
+		printf("failed to allocate accumulation image memory.\n");
+		return;
+	}
+	vkBindImageMemory(window->vk_objects.device, window->vk_objects.accumImageRes.outputImage, window->vk_objects.accumImageRes.outputImageMemory, 0);
+
+	VkImageViewCreateInfo view_create_info = {0};
+	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_create_info.image = window->vk_objects.accumImageRes.outputImage;
+	view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_create_info.format = ACCUM_IMAGE_FORMAT;
+	view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	view_create_info.subresourceRange.baseMipLevel = 0;
+	view_create_info.subresourceRange.levelCount = 1;
+	view_create_info.subresourceRange.baseArrayLayer = 0;
+	view_create_info.subresourceRange.layerCount = 1;
+
+	if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &window->vk_objects.accumImageRes.outputImageView) != VK_SUCCESS) {
+		printf("failed to create accumulation image view.\n");
+		return;
+	}
+
+	printf("accumulation image created.\n");
+}
+
+
 uint32_t findMemoryTypeIndex(Window_t* window, uint32_t typeBits, VkMemoryPropertyFlags required) {
 	VkPhysicalDeviceMemoryProperties mem_props;
 	vkGetPhysicalDeviceMemoryProperties(window->vk_objects.physicalDevice, &mem_props);
@@ -752,7 +886,7 @@ void createSwapchain(Window_t* window) {
 void createComputePipeline(Window_t* window) {
 	Pipeline_t pipeline = {0};
 
-	VkDescriptorSetLayoutBinding bindings[4] = {0};
+	VkDescriptorSetLayoutBinding bindings[6] = {0};
 	bindings[0].binding = 1;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	bindings[0].descriptorCount = 1;
@@ -773,9 +907,19 @@ void createComputePipeline(Window_t* window) {
 	bindings[3].descriptorCount = 1;
 	bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+	bindings[4].binding = 5;
+	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	bindings[4].descriptorCount = 1;
+	bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	bindings[5].binding = 6;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[5].descriptorCount = 1;
+	bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
 	VkDescriptorSetLayoutCreateInfo set_layout_info = {0};
 	set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	set_layout_info.bindingCount = 4;
+	set_layout_info.bindingCount = 6;
 	set_layout_info.pBindings = bindings;
 
 	if (vkCreateDescriptorSetLayout(window->vk_objects.device, &set_layout_info, NULL, &window->vk_objects.computeDescriptorSetLayout) != VK_SUCCESS) {
@@ -895,10 +1039,15 @@ Vk_Buffer_t createHostVisibleBuffer(Window_t* window, VkDeviceSize size, VkBuffe
 	return buf;
 }
 
-//worldGridBuffer/materialProperitesBuffer aren't sampled by the shader yet, so they're just zeroed for now
 void createComputeBuffers(Window_t* window) {
 	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
 	window->vk_objects.worldGridBuffer = createHostVisibleBuffer(window, world_grid_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+	// one block per bit: (DIM/BLOCK_SIZE)^3 blocks, packed 8 bits/byte
+	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
+	VkDeviceSize world_grid_mask_size = (VkDeviceSize)blocksPerAxis * blocksPerAxis * blocksPerAxis;
+	world_grid_mask_size = (world_grid_mask_size + 7) / 8; // bits -> bytes, rounded up
+	window->vk_objects.worldGridMaskBuffer = createHostVisibleBuffer(window, world_grid_mask_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 	VkDeviceSize materials_size = (VkDeviceSize)MAX_MATERIALS * sizeof(Material);
 	window->vk_objects.materialProperitesBuffer = createHostVisibleBuffer(window, materials_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -910,16 +1059,111 @@ void createComputeBuffers(Window_t* window) {
 	printf("compute buffers created.\n");
 }
 
+void window_world_buffer_load(Window_t* window) {
+	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
+	memset(voxels, 0, world_grid_size);
+
+	uint32_t cubeSize = VOXEL_GRID_DIM / 4;
+	uint32_t cubeStart = (VOXEL_GRID_DIM - cubeSize) / 2;
+	for (uint32_t cz = 0; cz < cubeSize; cz++) {
+		for (uint32_t cy = 0; cy < cubeSize; cy++) {
+			for (uint32_t cx = 0; cx < cubeSize; cx++) {
+				uint32_t vx = cubeStart + cx;
+				uint32_t vy = cubeStart + cy;
+				uint32_t vz = cubeStart + cz;
+				uint32_t idx = vx + vy * VOXEL_GRID_DIM + vz * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+				voxels[idx] = rand() % 300 ? 0 : (rand() % 5) + 1;
+			}
+		}
+	}
+
+
+	uint8_t* mask = (uint8_t*)window->vk_objects.worldGridMaskBuffer.mapped;
+	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
+	memset(mask, 0, (VkDeviceSize)((blocksPerAxis * blocksPerAxis * blocksPerAxis + 7) / 8));
+	for (uint32_t bz = 0; bz < blocksPerAxis; bz++) {
+		for (uint32_t by = 0; by < blocksPerAxis; by++) {
+			for (uint32_t bx = 0; bx < blocksPerAxis; bx++) {
+				bool solid = false;
+				for (uint32_t vz = 0; vz < VOXEL_MASK_BLOCK_SIZE && !solid; vz++) {
+					for (uint32_t vy = 0; vy < VOXEL_MASK_BLOCK_SIZE && !solid; vy++) {
+						for (uint32_t vx = 0; vx < VOXEL_MASK_BLOCK_SIZE; vx++) {
+							uint32_t x = bx * VOXEL_MASK_BLOCK_SIZE + vx;
+							uint32_t y = by * VOXEL_MASK_BLOCK_SIZE + vy;
+							uint32_t z = bz * VOXEL_MASK_BLOCK_SIZE + vz;
+							uint32_t idx = x + y * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+							if (voxels[idx] != 0) { solid = true; break; }
+						}
+					}
+				}
+				if (solid) {
+					uint32_t blockIndex = bx + by * blocksPerAxis + bz * blocksPerAxis * blocksPerAxis;
+					mask[blockIndex >> 3] |= (uint8_t)(1u << (blockIndex & 7u));
+				}
+			}
+		}
+	}
+
+	Material* materials = (Material*)window->vk_objects.materialProperitesBuffer.mapped;
+
+	materials[1].color[0] = 1.0f;
+	materials[1].color[1] = 0.0f;
+	materials[1].color[2] = 0.0f;
+	materials[1].color[3] = 1.0f;
+
+	materials[2].color[0] = 0.0f;
+	materials[2].color[1] = 1.0f;
+	materials[2].color[2] = 0.0f;
+	materials[2].color[3] = 1.0f;
+
+	materials[3].color[0] = 0.0f;
+	materials[3].color[1] = 0.0f;
+	materials[3].color[2] = 1.0f;
+	materials[3].color[3] = 1.0f;
+
+	materials[4].color[0] = 1.0f;
+	materials[4].color[1] = 1.0f;
+	materials[4].color[2] = 1.0f;
+	materials[4].color[3] = 1.0f;
+
+	materials[5].color[0] = 1.0f;
+	materials[5].color[1] = 1.0f;
+	materials[5].color[2] = 1.0f;
+	materials[5].color[3] = 1.0f;
+
+	for (uint32_t i = 1; i <= 5; i++) {
+		materials[i].emissionColor[0] = materials[i].color[0];
+		materials[i].emissionColor[1] = materials[i].color[1];
+		materials[i].emissionColor[2] = materials[i].color[2];
+		materials[i].emissionColor[3] = materials[i].color[3];
+		materials[i].emissionStrength = 0.0f;
+		materials[i].smoothness = 0.0f;
+		materials[i].specularProbability = 0.0f;
+	}
+
+	materials[5].emissionStrength = 10.0f;
+
+	materials[4].smoothness = 1.0f;
+	materials[4].specularProbability = 1.0f;
+
+	for (uint32_t i = 1; i <= 5; i++) {
+		for (int k = 0; k < 4; k++) {
+			materials[i].emissionColor[k] *= materials[i].emissionStrength;
+		}
+	}
+}
+
 
 void createComputeDescriptorSet(Window_t* window) {
 
 	VkDescriptorPoolSize pool_sizes[3] = {0};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[0].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT;
+	pool_sizes[0].descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT; // world grid + materials + world grid mask, per set
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[1].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT;
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-	pool_sizes[2].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT;
+	pool_sizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // output image + shared accum image, per set
 
 	VkDescriptorPoolCreateInfo pool_info = {0};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -963,7 +1207,17 @@ void createComputeDescriptorSet(Window_t* window) {
 	//one camera data buffer and output image per frame-in-flight, so writing/writing into next frame's resources can't race the GPU still using last frame's
 	VkDescriptorBufferInfo camera_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
-	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 4] = {0};
+	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 6] = {0};
+
+	VkDescriptorBufferInfo world_grid_mask_info = {0};
+	world_grid_mask_info.buffer = window->vk_objects.worldGridMaskBuffer.buffer;
+	world_grid_mask_info.offset = 0;
+	world_grid_mask_info.range = VK_WHOLE_SIZE;
+
+	//shared across every set: there's only one accumulation image, not one per frame-in-flight
+	VkDescriptorImageInfo accum_image_info = {0};
+	accum_image_info.imageView = window->vk_objects.accumImageRes.outputImageView;
+	accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		camera_data_infos[i].buffer = window->vk_objects.cameraDataBuffer[i].buffer;
@@ -973,7 +1227,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		image_infos[i].imageView = window->vk_objects.outputImageRes[i].outputImageView;
 		image_infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-		VkWriteDescriptorSet *frame_writes = &writes[i * 4];
+		VkWriteDescriptorSet *frame_writes = &writes[i * 6];
 
 		frame_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[0].dstSet = window->vk_objects.computeDescriptorSet[i];
@@ -1002,9 +1256,23 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[3].descriptorCount = 1;
 		frame_writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		frame_writes[3].pBufferInfo = &material_properties_info;
+
+		frame_writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		frame_writes[4].dstSet = window->vk_objects.computeDescriptorSet[i];
+		frame_writes[4].dstBinding = 5;
+		frame_writes[4].descriptorCount = 1;
+		frame_writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		frame_writes[4].pImageInfo = &accum_image_info;
+
+		frame_writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		frame_writes[5].dstSet = window->vk_objects.computeDescriptorSet[i];
+		frame_writes[5].dstBinding = 6;
+		frame_writes[5].descriptorCount = 1;
+		frame_writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		frame_writes[5].pBufferInfo = &world_grid_mask_info;
 	}
 
-	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 4, writes, 0, NULL);
+	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 6, writes, 0, NULL);
 
 	printf("compute descriptor set created.\n");
 }
@@ -1024,6 +1292,11 @@ void createSyncResources(Window_t* window) {
 
 	if (vkCreateSemaphore(window->vk_objects.device, &semaphore_create_info, NULL, &window->vk_objects.timelineSemaphore) != VK_SUCCESS) {
 		printf("Unable to create the timeline semaphore\n");
+		return;
+	}
+
+	if (vkCreateSemaphore(window->vk_objects.device, &semaphore_create_info, NULL, &window->vk_objects.computeTimelineSemaphore) != VK_SUCCESS) {
+		printf("Unable to create the compute timeline semaphore\n");
 		return;
 	}
 

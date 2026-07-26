@@ -7,6 +7,8 @@
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
 
+#include "camera.h"
+
 
 // Configuration constants
 #define VULKAN_VERSION        VK_API_VERSION_1_4
@@ -14,10 +16,12 @@
 #define SWAPCHAIN_FORMAT      VK_FORMAT_B8G8R8A8_SRGB
 #define DEPTH_FORMAT          VK_FORMAT_D32_SFLOAT
 #define OUTPUT_IMAGE_FORMAT   VK_FORMAT_R8G8B8A8_UNORM
+#define ACCUM_IMAGE_FORMAT    VK_FORMAT_R32G32B32A32_SFLOAT // needs full float precision; accumulated over many frames
 #define MAX_MATERIALS          256U // one per possible voxel byte value
 
 
 #define VOXEL_GRID_DIM 256U
+#define VOXEL_MASK_BLOCK_SIZE 8U // must match BLOCK_SIZE in shader.hlsl
 
 
 #include "compute_res.h"
@@ -75,10 +79,13 @@ typedef struct {
     VkCommandPool commandPool;
 
     VkSemaphore timelineSemaphore;
+    VkSemaphore computeTimelineSemaphore; // signaled right after the compute dispatch, not the whole frame
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
 	uint32_t frameCounter;
 
     Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
+    Vk_Image_t accumImageRes; // single, persistent across frames (not double-buffered like outputImageRes)
+    uint32_t accumCount;
     VkShaderModule computeShader;
     Pipeline_t computePipeline;
     VkDescriptorSetLayout computeDescriptorSetLayout;
@@ -86,6 +93,7 @@ typedef struct {
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
     Vk_Buffer_t worldGridBuffer;
+    Vk_Buffer_t worldGridMaskBuffer;
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
 
@@ -107,7 +115,7 @@ Window_t window_create();
 
 void window_attach_device(Window_t* window);
 
-void window_render(Window_t* window);
+void window_render(Window_t* window, Camera* cam);
 
 void window_world_buffer_load(Window_t* window);
 

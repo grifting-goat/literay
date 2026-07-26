@@ -12,7 +12,9 @@ typedef struct {
 
 typedef struct {
     float camera_position[4];
-	float camera_rotation[4];
+    float camera_forward[4];
+    float camera_right[4];
+    float camera_up[4];
 
     float tan_fov_v;
 	float tan_fov_h;
@@ -20,11 +22,10 @@ typedef struct {
 
 typedef struct {
     int _screen_size[2];
-    int pixel_count;
-    unsigned int voxelCount;
+    unsigned int frame_idx;
+    unsigned int accumCount; // fills the slot int3 below needs padding for anyway; keeps CPU/GPU layouts matched
 
     int _voxel_grid_size[3];
-    unsigned int frame_idx;
 } PushConstants;
 
 
