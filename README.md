@@ -10,8 +10,9 @@ This is my sandbox testing enviroment for voxel-based raytracing
 
 - Path tracing
     - using bitmasking layers for the grid-aligned voxels
+        - [Amanatides and Woo traversal](http://www.cse.yorku.ca/~amana/research/grid.pdf)
     - using Octrees for dynamic voxels
-
+    
 - Lighting
     - direct lighting (shadow rays for performance)
     - global illumination
@@ -25,7 +26,10 @@ This is my sandbox testing enviroment for voxel-based raytracing
 - Basic terrain generation
     - just stacked noise maps really
 
-- models
+- Portals
+    - portals are almost free thanks to path tracing
+
+- Models
     - add voxel models to the world
 
 - Networked
@@ -34,7 +38,7 @@ This is my sandbox testing enviroment for voxel-based raytracing
 
 ## Performace Goals
 
-- can run at 100 fps using 720p on my RTX 3050 laptop
+- Run at 100 fps using 720p on my RTX 3050 laptop
 - i know this is possible because i can do this with Lay of the Land with RT enabled
 
 ## Why

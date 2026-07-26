@@ -16,6 +16,12 @@
 #define OUTPUT_IMAGE_FORMAT   VK_FORMAT_R8G8B8A8_UNORM
 #define MAX_MATERIALS          256U // one per possible voxel byte value
 
+
+#define VOXEL_GRID_DIM 64U
+
+
+#include "compute_res.h"
+
 typedef struct {
 	VkPipelineLayout layout;
 	VkPipeline handle;
@@ -61,6 +67,7 @@ typedef struct {
 	VkPhysicalDevice physicalDevice;
 	uint32_t gfxQueueFamIdx;
 	VkDevice device;
+	VkQueue deviceQueue;
 	VkSurfaceKHR surface;
 
     Vk_Swapchain_t swapchain_data;
@@ -69,12 +76,18 @@ typedef struct {
 
     VkSemaphore timelineSemaphore;
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
+	uint32_t frameCounter;
 
     Vk_Image_t outputImageRes;
     VkShaderModule computeShader;
+    Pipeline_t computePipeline;
+    VkDescriptorSetLayout computeDescriptorSetLayout;
+    VkDescriptorPool computeDescriptorPool;
+    VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
     Vk_Buffer_t worldGridBuffer;
-    Vk_Buffer_t cameraDataBuffer;
+    Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
+    Vk_Buffer_t materialProperitesBuffer;
 
 } Vk_Objects_t;
 
@@ -93,6 +106,12 @@ typedef struct Window_t{
 Window_t window_create();
 
 void window_attach_device(Window_t* window);
+
+void window_render(Window_t* window);
+
+void window_world_buffer_load(Window_t* window);
+
+void window_close(Window_t* window);
 
 bool window_should_close(Window_t* window);
 
