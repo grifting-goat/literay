@@ -20,8 +20,8 @@
 #define MAX_MATERIALS          256U // one per possible voxel byte value
 
 
-#define VOXEL_GRID_DIM 256U
-#define VOXEL_MASK_BLOCK_SIZE 8U // must match BLOCK_SIZE in shader.hlsl
+#define VOXEL_GRID_DIM 512U
+#define VOXEL_MASK_BLOCK_SIZE 8U // match BLOCK_SIZE in shader
 
 
 #include "compute_res.h"

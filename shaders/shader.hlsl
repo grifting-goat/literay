@@ -39,9 +39,11 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 100.0f;
+static const float MAX_RAY_DISTANCE = 300.0f;
 static const uint MAX_BOUNCES = 2;
-static const uint RAYS_PER_PIXEL = 3;
+static const uint RAYS_PER_PIXEL = 2;
+
+static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
 
 static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
@@ -50,7 +52,7 @@ static const float3 SunDirection = float3(0.318f, 0.848f, 0.424f);
 static const float SunFocus = 500.0f;
 static const float SunIntensity = 5.0f;
 
-static const float3 AmbientLight = float3(0.05f, 0.05f, 0.05f);
+static const float3 AmbientLight = float3(0.005f, 0.005f, 0.005f);
 
 struct Ray {
     float3 origin;
@@ -107,7 +109,6 @@ Ray CreateCameraRay(float x, float y) {
     return CreateRay(camera_position.xyz, direction);
 }
 
-static const uint BLOCK_SIZE = 8; // must match the CPU-side block size used to build voxelsMaskIn
 
 bool IsBlockSolid(uint blockIndex) {
     uint word = voxelsMaskIn.Load((blockIndex >> 5) << 2);
@@ -121,7 +122,7 @@ uint ReadVoxel(uint index) {
     return (word >> shift) & 0xFFu;
 }
 
-// picks the axis with the smallest tMax; shared by both the block-level and voxel-level DDA below
+
 float3 DDAStepMask(float3 tMax) {
     float3 mask;
     mask.x = (tMax.x <= tMax.y) && (tMax.x <= tMax.z);
@@ -172,7 +173,6 @@ Hit CastRay(Ray ray) {
 
     int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
     int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
-    int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
 
     // fine 
     float3 nextBoundary = floor(ray.origin) + stepSign;
@@ -214,16 +214,25 @@ Hit CastRay(Ray ray) {
         float3 blockMask = DDAStepMask(blockTMax);
         blockTCurrent = dot(blockMask, blockTMax);
         blockTMax += blockMask * blockTDelta;
-        blockIndex += int(dot(blockMask, float3(blockIdxStep)));
+        normal = -blockMask * float3(istep);
 
+        // resync fine state at the block we just entered. bail out the moment the resolved
+        // cell is out of range instead of trusting blockTCurrent < tExit alone - floating-point
+        // drift over many block steps can let tExit's timing lag behind the true cell position,
+        // which previously meant ReadVoxel/IsBlockSolid could run on a wildly out-of-bounds index
+        float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.0001f);
+        cell = int3(floor(pos));
+        if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
+            break;
+        }
 
         tCurrent = blockTCurrent;
-        normal = -blockMask * float3(istep);
-        float3 pos = ray.origin + ray.direction * (tCurrent + 0.0001f);
-        cell = int3(floor(pos));
         float3 fineNextBoundary = floor(pos) + stepSign;
         tMax = select(ray.direction != 0.0f, (fineNextBoundary - ray.origin) * invDir, FLT_INF);
         voxelIndex = cell.x + cell.y * pc._voxel_grid_size.x + cell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
+
+        int3 newBlockCell = cell / int(BLOCK_SIZE);
+        blockIndex = newBlockCell.x + newBlockCell.y * blockGridSize.x + newBlockCell.z * blockGridSize.x * blockGridSize.y;
     }
     return hit;
 }

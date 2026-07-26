@@ -133,9 +133,7 @@ void window_render(Window_t* window, Camera* cam) {
 	wait_info.pValues=&wait_for_id;
 	vkWaitSemaphores(window->vk_objects.device, &wait_info, UINT64_MAX);
 
-	//only safe to write cameraDataBuffer[frame_res_index] once the wait above confirms the GPU is
-	//done reading it from frame (frame_id - MAX_FRAMES_IN_FLIGHT); writing it any earlier (e.g. from
-	//the main loop before calling window_render) races the GPU still reading that same slot
+
 	window_camera_buffer_update(window, cam, frame_res_index);
 
 	vkResetCommandPool(window->vk_objects.device, res->commandPool, 0);
@@ -170,9 +168,7 @@ void window_render(Window_t* window, Camera* cam) {
 	to_general_barrier.subresourceRange.baseArrayLayer=0;
 	to_general_barrier.subresourceRange.layerCount=1;
 
-	//accumImage is persistent (unlike outputImageRes, never discarded/UNDEFINED after frame 1) so the
-	//compute shader can read back last frame's running average; the cross-frame semaphore wait below is
-	//what actually makes last frame's write visible here, this barrier just states the access pattern
+	
 	VkImageMemoryBarrier2 accum_barrier={0};
 	accum_barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
 	accum_barrier.srcStageMask= frame_id == 1 ? VK_PIPELINE_STAGE_2_NONE : VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -305,9 +301,7 @@ void window_render(Window_t* window, Camera* cam) {
 
 	vkEndCommandBuffer(res->commandBuffer);
 
-	//two waits: swapchain image acquisition (existing), and the previous frame's own *compute* completion
-	//(dedicated semaphore, not the frame-completion one) so this frame's dispatch can't start reading/writing
-	//accumImage before that frame's write lands, without also stalling on the previous frame's blit/present
+
 	uint64_t prev_frame_id = frame_id > 1 ? frame_id - 1 : 0;
 
 	VkSemaphoreSubmitInfo wait_semaphore_infos[2]={0};
@@ -1059,25 +1053,112 @@ void createComputeBuffers(Window_t* window) {
 	printf("compute buffers created.\n");
 }
 
+
+static double perlin_fade(double t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
+static double perlin_lerp(double t, double a, double b) { return a + t * (b - a); }
+static double perlin_grad(int hash, double x, double y) {
+	int h = hash & 7;
+	double u = h < 4 ? x : y;
+	double v = h < 4 ? y : x;
+	return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
+}
+
+
+void generate_terrain_heightmap(Window_t* window) {
+	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
+
+	int perm[256];
+	for (int i = 0; i < 256; i++) { perm[i] = i; }
+	unsigned int seed = 1337u;
+	for (int i = 255; i > 0; i--) {
+		seed = seed * 1664525u + 1013904223u;
+		int j = (int)(seed % (unsigned int)(i + 1));
+		int tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+	}
+
+	double baseScale = 0.005;
+	double amplitude = (double)VOXEL_GRID_DIM / 10.0;
+	int octaves = 6;
+
+	for (uint32_t z = 0; z < VOXEL_GRID_DIM; z++) {
+		for (uint32_t x = 0; x < VOXEL_GRID_DIM; x++) {
+
+			double nx = (double)x * baseScale;
+			double nz = (double)z * baseScale;
+
+			double total = 0.0;
+			double freq = 1.0;
+			double amp = 1.0;
+			double maxAmp = 0.0;
+
+			for (int octave = 0; octave < octaves; octave++) {
+				double px = nx * freq;
+				double pz = nz * freq;
+
+				int xi = (int)floor(px);
+				int zi = (int)floor(pz);
+				int X = xi & 255;
+				int Z = zi & 255;
+				int X1 = (X + 1) & 255;
+				int Z1 = (Z + 1) & 255;
+				double xf = px - (double)xi;
+				double zf = pz - (double)zi;
+				double u = perlin_fade(xf);
+				double v = perlin_fade(zf);
+
+				int aa = perm[(perm[X] + Z) & 255];
+				int ba = perm[(perm[X1] + Z) & 255];
+				int ab = perm[(perm[X] + Z1) & 255];
+				int bb = perm[(perm[X1] + Z1) & 255];
+
+				double x1 = perlin_lerp(u, perlin_grad(aa, xf, zf), perlin_grad(ba, xf - 1.0, zf));
+				double x2 = perlin_lerp(u, perlin_grad(ab, xf, zf - 1.0), perlin_grad(bb, xf - 1.0, zf - 1.0));
+				double n = perlin_lerp(v, x1, x2);
+
+				total += n * amp;
+				maxAmp += amp;
+				freq *= 2.0;
+				amp *= 0.5;
+			}
+
+			double noiseValue = total / maxAmp; // roughly [-1, 1]
+
+			int height = (int)((double)(VOXEL_GRID_DIM / 2) + noiseValue * amplitude);
+			if (height < 1) { height = 1; }
+			if (height >= (int)VOXEL_GRID_DIM) { height = (int)VOXEL_GRID_DIM - 1; }
+
+			for (int y = 0; y < height; y++) {
+				uint32_t idx = x + (uint32_t)y * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+				voxels[idx] = 7; // brown, fills down to the bottom of the grid
+			}
+
+			uint32_t topIdx = x + (uint32_t)height * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+			voxels[topIdx] = 6; // green, top block of the column
+		}
+	}
+}
+
 void window_world_buffer_load(Window_t* window) {
 	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
 	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
 	memset(voxels, 0, world_grid_size);
 
-	uint32_t cubeSize = VOXEL_GRID_DIM / 4;
-	uint32_t cubeStart = (VOXEL_GRID_DIM - cubeSize) / 2;
-	for (uint32_t cz = 0; cz < cubeSize; cz++) {
-		for (uint32_t cy = 0; cy < cubeSize; cy++) {
-			for (uint32_t cx = 0; cx < cubeSize; cx++) {
-				uint32_t vx = cubeStart + cx;
-				uint32_t vy = cubeStart + cy;
-				uint32_t vz = cubeStart + cz;
-				uint32_t idx = vx + vy * VOXEL_GRID_DIM + vz * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-				voxels[idx] = rand() % 300 ? 0 : (rand() % 5) + 1;
-			}
+	generate_terrain_heightmap(window);
+
+	// horizontal mirror slab, centered in x/z, floating above the terrain
+	uint32_t slabY = (uint32_t)(VOXEL_GRID_DIM * 0.65);
+	uint32_t slabSize = VOXEL_GRID_DIM / 8;
+	uint32_t slabStart = (VOXEL_GRID_DIM - slabSize) / 2;
+	for (uint32_t sz = 0; sz < slabSize; sz++) {
+		for (uint32_t sx = 0; sx < slabSize; sx++) {
+			uint32_t x = slabStart + sx;
+			uint32_t z = slabStart + sz;
+			uint32_t idx = x + slabY * VOXEL_GRID_DIM + z * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+			voxels[idx] = 4;
 		}
 	}
-
+	uint32_t idx = (VOXEL_GRID_DIM / 2) + (VOXEL_GRID_DIM * 0.6) * VOXEL_GRID_DIM + (VOXEL_GRID_DIM / 2) * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+	voxels[idx] = 8;
 
 	uint8_t* mask = (uint8_t*)window->vk_objects.worldGridMaskBuffer.mapped;
 	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
@@ -1122,6 +1203,7 @@ void window_world_buffer_load(Window_t* window) {
 	materials[3].color[2] = 1.0f;
 	materials[3].color[3] = 1.0f;
 
+	//mirrors
 	materials[4].color[0] = 1.0f;
 	materials[4].color[1] = 1.0f;
 	materials[4].color[2] = 1.0f;
@@ -1132,7 +1214,25 @@ void window_world_buffer_load(Window_t* window) {
 	materials[5].color[2] = 1.0f;
 	materials[5].color[3] = 1.0f;
 
-	for (uint32_t i = 1; i <= 5; i++) {
+	//grass green
+	materials[6].color[0] = 0.016f;
+	materials[6].color[1] = 0.561f;
+	materials[6].color[2] = 0.008f;
+	materials[6].color[3] = 1.0f;
+
+	//brown
+	materials[7].color[0] = 0.451f;
+	materials[7].color[1] = 0.235f;
+	materials[7].color[2] = 0.004f;
+	materials[7].color[3] = 1.0f;
+
+	//light
+	materials[8].color[0] = 1.0f;
+	materials[8].color[1] = 1.0f;
+	materials[8].color[2] = 0.0f;
+	materials[8].color[3] = 1.0f;
+
+	for (uint32_t i = 1; i <= 8; i++) {
 		materials[i].emissionColor[0] = materials[i].color[0];
 		materials[i].emissionColor[1] = materials[i].color[1];
 		materials[i].emissionColor[2] = materials[i].color[2];
@@ -1143,11 +1243,15 @@ void window_world_buffer_load(Window_t* window) {
 	}
 
 	materials[5].emissionStrength = 10.0f;
+	materials[8].emissionStrength = 10.0f;
 
 	materials[4].smoothness = 1.0f;
 	materials[4].specularProbability = 1.0f;
 
-	for (uint32_t i = 1; i <= 5; i++) {
+	materials[7].specularProbability = 1.0f;
+	materials[7].smoothness = 0.4f;
+
+	for (uint32_t i = 1; i <= 8; i++) {
 		for (int k = 0; k < 4; k++) {
 			materials[i].emissionColor[k] *= materials[i].emissionStrength;
 		}
