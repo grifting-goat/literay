@@ -17,7 +17,7 @@
 #define MAX_MATERIALS          256U // one per possible voxel byte value
 
 
-#define VOXEL_GRID_DIM 64U
+#define VOXEL_GRID_DIM 256U
 
 
 #include "compute_res.h"
@@ -78,7 +78,7 @@ typedef struct {
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
 	uint32_t frameCounter;
 
-    Vk_Image_t outputImageRes;
+    Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
     VkShaderModule computeShader;
     Pipeline_t computePipeline;
     VkDescriptorSetLayout computeDescriptorSetLayout;

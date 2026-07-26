@@ -2,7 +2,10 @@
 
 struct Material {
     float4 color;
-    float4 emmisonColor;
+    float4 emissionColor;
+    float emissionStrength;
+    float smoothness;
+    float specularProbability;
 };
 [[vk::binding(2, 0)]] StructuredBuffer<Material> materials;
 
@@ -25,53 +28,67 @@ struct PushConstants {
     uint voxelCount;
 
     int3 _voxel_grid_size;
+    uint frame_idx;
 };
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 200.0f;
-static const uint MAX_BOUNCES = 1;
+static const float MAX_RAY_DISTANCE = 100.0f;
+static const uint MAX_BOUNCES = 2;
+static const uint RAYS_PER_PIXEL = 2;
+
+static const bool EnvironmentEnabled = true;
+static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
+static const float3 SkyColourZenith = float3(0.2f, 0.4f, 0.9f);
+static const float3 SunDirection = float3(0.318f, 0.848f, 0.424f);
+static const float SunFocus = 500.0f;
+static const float SunIntensity = 5.0f;
+
+static const float3 AmbientLight = float3(0.005f, 0.005f, 0.005f);
 
 struct Ray {
     float3 origin;
     float3 direction;
+
     float4 color;
+    float4 incomingLight;
 
     float dist0;
-    uint bounces;
 };
 
 struct Hit {
     float dist;
+    float3 end;
     float3 normal;
     uint mat_type;
 };
 
+//RNG //https://github.com/SebLague/Ray-Tracing
+uint NextRandom(inout uint state) {
+    state = state * 747796405 + 2891336453;
+    uint result = ((state >> ((state >> 28) + 4)) ^ state) * 277803737;
+    result = (result >> 22) ^ result;
+    return result;
+}
 
-float3 RotateVector(float3 vect, float3 rotation) {
-    float xr = rotation.x;
-    float yr = rotation.y;
-    float zr = rotation.z;
+float RandomValue(inout uint state) {
+    return NextRandom(state) / 4294967295.0; // 2^32 - 1
+}
 
-    float3x3 Rx = float3x3(
-        1,  0,  0,
-        0,  cos(xr),    -sin(xr),
-        0,  sin(xr),    cos(xr)
-    );
+// Random value in normal distribution (with mean=0 and sd=1)
+float RandomValueNormalDistribution(inout uint state) {
+    float theta = 2 * 3.1415926 * RandomValue(state);
+    float rho = sqrt(-2 * log(RandomValue(state)));
+    return rho * cos(theta);
+}
 
-    float3x3 Ry = float3x3(
-        cos(yr),    0,    sin(yr),
-        0,  1,  0,
-        -sin(yr),   0,   cos(yr)
-    );
+// Calculate a random direction
+float3 RandomDirection(inout uint state) {
 
-    float3x3 Rz = float3x3(
-        cos(zr), -sin(zr),  0,
-        sin(zr),  cos(zr),  0,
-        0,  0,  1
-    );
-
-    return mul(mul(mul(Ry, Rx), Rz), vect);
+    float x = RandomValueNormalDistribution(state);
+    float y = RandomValueNormalDistribution(state);
+    float z = RandomValueNormalDistribution(state);
+    return normalize(float3(x, y, z));
 }
 
 Ray CreateRay(float3 origin, float3 direction) {
@@ -79,17 +96,24 @@ Ray CreateRay(float3 origin, float3 direction) {
     ray.origin = origin;
     ray.direction = normalize(direction);
     ray.color = float4(1.0f,1.0f,1.0f,1.0f);
+    ray.incomingLight = 0.0f;
     ray.dist0 = 0.0f;
-    ray.bounces = 0;
     return ray;
 }
 
 Ray CreateCameraRay(float x, float y) {
     x = (x - 0.5f) * 2.0f;
-    y = (y - 0.5f) * 2.0f;
+    y = (0.5f - y) * 2.0f;
 
-    float3 plane = float3(x * tan_fov_h, y * tan_fov_v, 1.0f);
-    float3 direction = RotateVector(normalize(plane), camera_rotation.xyz);
+    float pitch = camera_rotation.x;
+    float yaw = camera_rotation.y;
+
+    // Minecraft-style yaw/pitch: +Y up, yaw 0 looks toward +Z, pitch>0 looks down.
+    float3 forward = float3(-sin(yaw) * cos(pitch), -sin(pitch), cos(yaw) * cos(pitch));
+    float3 right = float3(-cos(yaw), 0.0f, -sin(yaw));
+    float3 up = cross(right, forward);
+
+    float3 direction = forward + x * tan_fov_h * right + y * tan_fov_v * up;
 
     return CreateRay(camera_position.xyz, direction);
 }
@@ -100,6 +124,25 @@ uint ReadVoxel(uint index) {
     return (word >> shift) & 0xFFu;
 }
 
+//https://github.com/SebLague/Ray-Tracing
+float4 GetEnvironmentLight(Ray ray) {
+
+    if (!EnvironmentEnabled) {
+        return 0;
+    }
+
+    if (ray.direction.y <= 0.0f) {
+        float voidT = smoothstep(-0.4f, 0.0f, ray.direction.y);
+        return float4(SkyColourHorizon * voidT, 1.0f);
+    }
+
+    float skyGradientT = pow(smoothstep(0, 0.4, ray.direction.y), 0.35);
+    float3 skyGradient = lerp(SkyColourHorizon, SkyColourZenith, skyGradientT);
+    float sun = pow(max(0, dot(ray.direction, SunDirection)), SunFocus) * SunIntensity;
+
+    float3 composite = skyGradient + sun;
+    return float4(composite, 1.0f);
+}
 
 Hit CastRay(Ray ray) {
 
@@ -148,6 +191,7 @@ Hit CastRay(Ray ray) {
         if (hit.mat_type != 0) {
             hit.dist = tCurrent;
             hit.normal = normal;
+            hit.end = ray.origin + ray.direction * tCurrent;
             break;
         }
 
@@ -187,7 +231,9 @@ Hit CastRay(Ray ray) {
     return hit;
 }
 
-
+float3 Reflect(float3 dir, float3 normal) {
+    return dir - 2 * dot(dir, normal) * normal;
+}
 
 
 [numthreads(8, 8, 1)]
@@ -197,25 +243,53 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         return;
     }
 
-    float x = (float(pixel.x) + 0.5f) / float(pc._screen_size.x);
-    float y = (float(pixel.y) + 0.5f) / float(pc._screen_size.y);
+    uint pixelIndex = uint(pixel.y) * uint(pc._screen_size.x) + uint(pixel.x);
+    uint rngState = pixelIndex + pc.frame_idx * 719393;
 
-    Ray r = CreateCameraRay(x, y);
+    float4 totalLight = 0.0f;
 
-    while(r.bounces < MAX_BOUNCES) {
-        Hit hit = CastRay(r);
-        if (hit.mat_type != 0) {
-            r.color = r.color * materials[hit.mat_type].color;
-            r.dist0 = hit.dist;
-            r.bounces = r.bounces + 1;
+    for (uint sample = 0; sample < RAYS_PER_PIXEL; sample++) {
+        float jitterX = RandomValue(rngState) - 0.5f;
+        float jitterY = RandomValue(rngState) - 0.5f;
+        float x = (float(pixel.x) + 0.5f + jitterX) / float(pc._screen_size.x);
+        float y = (float(pixel.y) + 0.5f + jitterY) / float(pc._screen_size.y);
+
+        Ray r = CreateCameraRay(x, y);
+        uint bounces;
+        for (bounces = 0; bounces < MAX_BOUNCES; bounces++) {
+            Hit hit = CastRay(r);
+            if (hit.mat_type != 0) {
+
+                r.color *= materials[hit.mat_type].color;
+                float4 emittedLight = materials[hit.mat_type].emissionColor * materials[hit.mat_type].emissionStrength;
+                r.incomingLight += emittedLight * r.color;
+
+                r.origin = hit.end + hit.normal * 0.001f;
+
+                bool isSpecular = materials[hit.mat_type].specularProbability >= RandomValue(rngState);
+
+                float3 diffuseDir = normalize(hit.normal + RandomDirection(rngState));
+                float3 specularDir = Reflect(r.direction, hit.normal);
+
+                r.direction = normalize(lerp(diffuseDir, specularDir, materials[hit.mat_type].smoothness * isSpecular));
+
+
+                if (!bounces) {
+                    r.dist0 = hit.dist;
+                    r.incomingLight += float4(AmbientLight, 1.0f) * r.color;
+                }
+            }
+            else {
+                r.incomingLight += GetEnvironmentLight(r) * r.color;
+                break;
+            }
         }
-        else {
-            break;
-        }
+
+        totalLight += r.incomingLight;
     }
 
-    float shade = r.dist0 / 50.0f;
-    outputImage[pixel] = r.color * float4(shade, shade, shade, 1.0f);
+    //float shade = (bounces > 0) ? saturate(1.0f - (r.dist0 / MAX_RAY_DISTANCE)) : 1.0f;
+    outputImage[pixel] = totalLight / float(RAYS_PER_PIXEL);
 
 }
 

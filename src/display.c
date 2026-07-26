@@ -125,7 +125,7 @@ void window_render(Window_t* window) {
 	to_general_barrier.newLayout=VK_IMAGE_LAYOUT_GENERAL;
 	to_general_barrier.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
 	to_general_barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-	to_general_barrier.image=window->vk_objects.outputImageRes.outputImage;
+	to_general_barrier.image=window->vk_objects.outputImageRes[frame_res_index].outputImage;
 	to_general_barrier.subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
 	to_general_barrier.subresourceRange.baseMipLevel=0;
 	to_general_barrier.subresourceRange.levelCount=1;
@@ -149,6 +149,7 @@ void window_render(Window_t* window) {
 	push_constants._voxel_grid_size[1] = (int)VOXEL_GRID_DIM;
 	push_constants._voxel_grid_size[2] = (int)VOXEL_GRID_DIM;
 	push_constants.voxelCount = VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+	push_constants.frame_idx = (unsigned int)frame_id;
 	vkCmdPushConstants(res->commandBuffer, window->vk_objects.computePipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &push_constants);
 
 	uint32_t group_count_x = (window->vk_objects.swapchain_data.swapchainWidth + 7) / 8;
@@ -167,7 +168,7 @@ void window_render(Window_t* window) {
 	pre_blit_barriers[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 	pre_blit_barriers[0].srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
 	pre_blit_barriers[0].dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
-	pre_blit_barriers[0].image=window->vk_objects.outputImageRes.outputImage;
+	pre_blit_barriers[0].image=window->vk_objects.outputImageRes[frame_res_index].outputImage;
 	pre_blit_barriers[0].subresourceRange.aspectMask=VK_IMAGE_ASPECT_COLOR_BIT;
 	pre_blit_barriers[0].subresourceRange.baseMipLevel=0;
 	pre_blit_barriers[0].subresourceRange.levelCount=1;
@@ -215,7 +216,7 @@ void window_render(Window_t* window) {
 	blit_region.dstOffsets[1].z=1;
 
 	vkCmdBlitImage(res->commandBuffer,
-		window->vk_objects.outputImageRes.outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		window->vk_objects.outputImageRes[frame_res_index].outputImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 		window->vk_objects.swapchain_data.swapchainImages[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		1, &blit_region, VK_FILTER_NEAREST);
 
@@ -570,54 +571,56 @@ void createDevice(Window_t* window) {
 
 void createOutputImage(Window_t* window) {
 
-	VkImageCreateInfo image_create_info = {0};
-	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-	image_create_info.imageType = VK_IMAGE_TYPE_2D;
-	image_create_info.format = OUTPUT_IMAGE_FORMAT;
-	image_create_info.extent.width = window->width;
-	image_create_info.extent.height = window->height;
-	image_create_info.extent.depth = 1;
-	image_create_info.mipLevels = 1;
-	image_create_info.arrayLayers = 1;
-	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
-	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-	image_create_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-	image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+		VkImageCreateInfo image_create_info = {0};
+		image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		image_create_info.imageType = VK_IMAGE_TYPE_2D;
+		image_create_info.format = OUTPUT_IMAGE_FORMAT;
+		image_create_info.extent.width = window->width;
+		image_create_info.extent.height = window->height;
+		image_create_info.extent.depth = 1;
+		image_create_info.mipLevels = 1;
+		image_create_info.arrayLayers = 1;
+		image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+		image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		image_create_info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &window->vk_objects.outputImageRes.outputImage) != VK_SUCCESS) {
-		printf("failed to create output image.\n");
-		return;
-	}
+		if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &window->vk_objects.outputImageRes[i].outputImage) != VK_SUCCESS) {
+			printf("failed to create output image.\n");
+			return;
+		}
 
-	VkMemoryRequirements mem_reqs;
-	vkGetImageMemoryRequirements(window->vk_objects.device, window->vk_objects.outputImageRes.outputImage, &mem_reqs);
+		VkMemoryRequirements mem_reqs;
+		vkGetImageMemoryRequirements(window->vk_objects.device, window->vk_objects.outputImageRes[i].outputImage, &mem_reqs);
 
-	VkMemoryAllocateInfo alloc_info = {0};
-	alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	alloc_info.allocationSize = mem_reqs.size;
-	alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+		VkMemoryAllocateInfo alloc_info = {0};
+		alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		alloc_info.allocationSize = mem_reqs.size;
+		alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &window->vk_objects.outputImageRes.outputImageMemory) != VK_SUCCESS) {
-		printf("failed to allocate output image memory.\n");
-		return;
-	}
-	vkBindImageMemory(window->vk_objects.device, window->vk_objects.outputImageRes.outputImage, window->vk_objects.outputImageRes.outputImageMemory, 0);
+		if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &window->vk_objects.outputImageRes[i].outputImageMemory) != VK_SUCCESS) {
+			printf("failed to allocate output image memory.\n");
+			return;
+		}
+		vkBindImageMemory(window->vk_objects.device, window->vk_objects.outputImageRes[i].outputImage, window->vk_objects.outputImageRes[i].outputImageMemory, 0);
 
-	VkImageViewCreateInfo view_create_info = {0};
-	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	view_create_info.image = window->vk_objects.outputImageRes.outputImage;
-	view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-	view_create_info.format = OUTPUT_IMAGE_FORMAT;
-	view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	view_create_info.subresourceRange.baseMipLevel = 0;
-	view_create_info.subresourceRange.levelCount = 1;
-	view_create_info.subresourceRange.baseArrayLayer = 0;
-	view_create_info.subresourceRange.layerCount = 1;
+		VkImageViewCreateInfo view_create_info = {0};
+		view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		view_create_info.image = window->vk_objects.outputImageRes[i].outputImage;
+		view_create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		view_create_info.format = OUTPUT_IMAGE_FORMAT;
+		view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		view_create_info.subresourceRange.baseMipLevel = 0;
+		view_create_info.subresourceRange.levelCount = 1;
+		view_create_info.subresourceRange.baseArrayLayer = 0;
+		view_create_info.subresourceRange.layerCount = 1;
 
-	if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &window->vk_objects.outputImageRes.outputImageView) != VK_SUCCESS) {
-		printf("failed to create output image view.\n");
-		return;
+		if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &window->vk_objects.outputImageRes[i].outputImageView) != VK_SUCCESS) {
+			printf("failed to create output image view.\n");
+			return;
+		}
 	}
 
 	printf("output image created.\n");
@@ -946,29 +949,29 @@ void createComputeDescriptorSet(Window_t* window) {
 		return;
 	}
 
-	//static across every frame: world grid, material properties, and the single output image
+	//static across every frame: world grid and material properties
 	VkDescriptorBufferInfo world_grid_info = {0};
 	world_grid_info.buffer = window->vk_objects.worldGridBuffer.buffer;
 	world_grid_info.offset = 0;
 	world_grid_info.range = VK_WHOLE_SIZE;
-
-	VkDescriptorImageInfo image_info = {0};
-	image_info.imageView = window->vk_objects.outputImageRes.outputImageView;
-	image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
 	VkDescriptorBufferInfo material_properties_info = {0};
 	material_properties_info.buffer = window->vk_objects.materialProperitesBuffer.buffer;
 	material_properties_info.offset = 0;
 	material_properties_info.range = VK_WHOLE_SIZE;
 
-	//one camera data buffer per frame-in-flight, so writing next frame's camera data can't race the GPU still reading last frame's
+	//one camera data buffer and output image per frame-in-flight, so writing/writing into next frame's resources can't race the GPU still using last frame's
 	VkDescriptorBufferInfo camera_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
+	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 4] = {0};
 
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		camera_data_infos[i].buffer = window->vk_objects.cameraDataBuffer[i].buffer;
 		camera_data_infos[i].offset = 0;
 		camera_data_infos[i].range = VK_WHOLE_SIZE;
+
+		image_infos[i].imageView = window->vk_objects.outputImageRes[i].outputImageView;
+		image_infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
 		VkWriteDescriptorSet *frame_writes = &writes[i * 4];
 
@@ -991,7 +994,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[2].dstBinding = 4;
 		frame_writes[2].descriptorCount = 1;
 		frame_writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		frame_writes[2].pImageInfo = &image_info;
+		frame_writes[2].pImageInfo = &image_infos[i];
 
 		frame_writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[3].dstSet = window->vk_objects.computeDescriptorSet[i];
