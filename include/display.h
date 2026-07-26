@@ -3,7 +3,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
-
+#include <stdbool.h>
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
 
@@ -44,13 +44,26 @@ typedef struct {
 } Vk_Buffer_t;
 
 typedef struct {
+    VkSwapchainKHR swapchain;
+	VkImage* swapchainImages;
+	VkSemaphore* renderCompleteSemaphores;
+	uint32_t swapchainWidth;
+	uint32_t swapchainHeight;
+	uint32_t swapchainImageCount;
+
+} Vk_Swapchain_t;
+
+typedef struct {
 
     VkApplicationInfo appInfo;
 
     VkInstance vulkanInstance;
 	VkPhysicalDevice physicalDevice;
+	uint32_t gfxQueueFamIdx;
 	VkDevice device;
 	VkSurfaceKHR surface;
+
+    Vk_Swapchain_t swapchain_data;
 
     VkCommandPool commandPool;
 
@@ -67,7 +80,7 @@ typedef struct {
 
 
 typedef struct Window_t{
-	GLFWwindow *window;
+	GLFWwindow *glfw_window;
 	uint32_t width;
 	uint32_t height;
 
@@ -79,11 +92,13 @@ typedef struct Window_t{
 
 Window_t window_create();
 
+void window_attach_device(Window_t* window);
 
-VkApplicationInfo AppInfoCreate(Window_t* window);
-VkInstance VulkanInstanceCreate(Window_t* window);
-GLFWwindow* WindowCreate(Window_t* window);
-VkSurfaceKHR SurfaceCreate(Window_t* window);
+bool window_should_close(Window_t* window);
+
+void window_poll_events(Window_t* window);
+
+
 
 
 
