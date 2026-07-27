@@ -27,10 +27,16 @@ int main() {
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
+	material_palette_create();
 
-	Vector_t wrld_dim = vector_create((float)VOXEL_GRID_DIM, (float)VOXEL_GRID_DIM, (float)VOXEL_GRID_DIM);
+	uint32_t wrld_dim[3] = { VOXEL_GRID_DIM, VOXEL_GRID_DIM, VOXEL_GRID_DIM };
 	World wrld = world_create(wrld_dim);
 	world_generate_terrain(&wrld);
+	world_generate_structures(&wrld);
+
+	uint32_t spawnX = (uint32_t)spawn.x;
+	uint32_t spawnZ = (uint32_t)spawn.z;
+	cam.pos.y = wrld.hieght_map[spawnX + spawnZ * wrld_dim[2]] + 6.0f;
 
     window_attach_device(&window);
     window_world_buffer_load(&window, &wrld);
@@ -64,7 +70,7 @@ int main() {
 		if (fpsTimer >= fpsUpdateInterval) {
 			double fps = (double)fpsFrameCount / fpsTimer;
 			double avgFrameTimeMs = (fpsTimer / fpsFrameCount) * 1000.0;
-			printf("\rFPS: %6.1f | frame time: %6.3f ms", fps, avgFrameTimeMs);
+			printf("\rFPS: %6.1f | frame time: %6.3f ms | pos: (%.1f, %.1f, %.1f)", fps, avgFrameTimeMs, cam.pos.x, cam.pos.y, cam.pos.z);
 			fflush(stdout);
 			fpsTimer = 0.0;
 			fpsFrameCount = 0;
@@ -94,5 +100,5 @@ int main() {
     }
 
     window_close(&window);
-    free(wrld.voxels);
+    world_destroy(&wrld);
 }

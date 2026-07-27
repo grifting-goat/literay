@@ -18,6 +18,7 @@
 #define DEPTH_FORMAT          VK_FORMAT_D32_SFLOAT
 #define OUTPUT_IMAGE_FORMAT   VK_FORMAT_R8G8B8A8_UNORM
 #define ACCUM_IMAGE_FORMAT    VK_FORMAT_R32G32B32A32_SFLOAT // needs full float precision; accumulated over many frames
+#define WORLD_TEXTURE_FORMAT  VK_FORMAT_R8_UINT // 3D voxel material ids
 #define MAX_MATERIALS          256U // one per possible voxel byte value
 
 
@@ -93,8 +94,9 @@ typedef struct {
     VkDescriptorPool computeDescriptorPool;
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
-    Vk_Buffer_t worldGridBuffer;
+    Vk_Image_t worldVoxelTexture; // 3D R8_UINT; optimal tiling keeps 3D-adjacent voxels cache-adjacent
     Vk_Buffer_t worldGridMaskBuffer;
+    Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
 

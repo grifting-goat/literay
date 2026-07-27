@@ -1,5 +1,6 @@
-[[vk::binding(1, 0)]] ByteAddressBuffer voxelsIn;
+[[vk::binding(1, 0)]] Texture3D<uint> voxelsIn; // material ids, R8_UINT
 [[vk::binding(6, 0)]] ByteAddressBuffer voxelsMaskIn;
+[[vk::binding(7, 0)]] ByteAddressBuffer voxelsOccIn; // 1 bit per voxel
 
 struct Material {
     float4 color;
@@ -40,9 +41,9 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 300.0f;
+static const float MAX_RAY_DISTANCE = 600.0f;
 static const uint MAX_BOUNCES = 2;
-static const uint RAYS_PER_PIXEL = 2;
+static const uint RAYS_PER_PIXEL = 1;
 
 static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
 
@@ -50,10 +51,11 @@ static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
 static const float3 SkyColourZenith = float3(0.2f, 0.4f, 0.9f);
 static const float3 SunDirection = float3(0.318f, 0.848f, 0.424f);
+static const float3 SunColor = float3(1.0f, 0.992f, 0.957f);
 static const float SunFocus = 500.0f;
-static const float SunIntensity = 5.0f;
+static const float SunIntensity = 6.0f;
 
-static const float3 AmbientLight = float3(0.005f, 0.005f, 0.005f);
+static const float3 AmbientLight = float3(0.05f, 0.05f, 0.05f);
 
 struct Ray {
     float3 origin;
@@ -123,10 +125,15 @@ bool IsBlockSolid(uint blockIndex) {
     return ((word >> bit) & 1u) != 0u;
 }
 
-uint ReadVoxel(uint index) {
-    uint word = voxelsIn.Load(index & ~3u);
-    uint shift = (index & 3u) * 8u;
-    return (word >> shift) & 0xFFu;
+// occupancy bit only; the material byte is fetched just once, on an actual hit
+bool IsVoxelSolid(uint index) {
+    uint word = voxelsOccIn.Load((index >> 5) << 2);
+    uint bit = index & 31u;
+    return ((word >> bit) & 1u) != 0u;
+}
+
+uint ReadVoxel(int3 cell) {
+    return voxelsIn.Load(int4(cell, 0));
 }
 
 
@@ -180,33 +187,35 @@ Hit CastRay(Ray ray) {
 
     int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
     int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
+    int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
 
-    // fine 
-    float3 nextBoundary = floor(ray.origin) + stepSign;
-    float3 tMax = select(ray.direction != 0.0f, (nextBoundary - ray.origin) * invDir, FLT_INF);
-    int voxelIndex = cell.x + cell.y * pc._voxel_grid_size.x + cell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
-    float3 normal = float3(0.0f, 0.0f, 0.0f);
-    float tCurrent = 0.0f;
-
-    // coarse 
+    // coarse state only; fine state is rebuilt on entry into a solid block
     int3 blockCell = cell / int(BLOCK_SIZE);
     float3 blockNextBoundary = float3(blockCell) * BLOCK_SIZE + stepSign * BLOCK_SIZE;
     float3 blockTMax = select(ray.direction != 0.0f, (blockNextBoundary - ray.origin) * invDir, FLT_INF);
     float3 blockTDelta = tDelta * BLOCK_SIZE;
     int blockIndex = blockCell.x + blockCell.y * blockGridSize.x + blockCell.z * blockGridSize.x * blockGridSize.y;
     float blockTCurrent = 0.0f;
+    float3 normal = float3(0.0f, 0.0f, 0.0f);
 
     while (blockTCurrent < tExit) {
 
         if (IsBlockSolid(uint(blockIndex))) {
-            // +0.01f only on the block boundary (blockTMax/tMax round independently and can
-            // disagree); never on tExit, or the unbounded inner loop below reads past the grid
+            // entry point nudged forward, then clamped into the block (guards the epsilon drift)
+            float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
+            int3 blockMin = blockCell * int(BLOCK_SIZE);
+            int3 fineCell = clamp(int3(floor(pos)), blockMin, blockMin + int(BLOCK_SIZE) - 1);
+
+            float tCurrent = blockTCurrent;
+            float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
+            int voxelIndex = fineCell.x + fineCell.y * pc._voxel_grid_size.x + fineCell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
+
             float blockBoundary = min(min(blockTMax.x, blockTMax.y), blockTMax.z) + 0.01f;
             float blockExit = min(blockBoundary, tExit);
 
             while (tCurrent < blockExit) {
-                hit.mat_type = ReadVoxel(uint(voxelIndex));
-                if (hit.mat_type != 0) {
+                if (IsVoxelSolid(uint(voxelIndex))) {
+                    hit.mat_type = ReadVoxel(fineCell);
                     hit.dist = tCurrent;
                     hit.normal = normal;
                     hit.end = ray.origin + ray.direction * tCurrent;
@@ -218,6 +227,7 @@ Hit CastRay(Ray ray) {
                 tMax += mask * tDelta;
                 normal = -mask * float3(istep);
                 voxelIndex += int(dot(mask, float3(idxStep)));
+                fineCell += int3(mask) * istep;
             }
         }
 
@@ -226,19 +236,11 @@ Hit CastRay(Ray ray) {
         blockTMax += blockMask * blockTDelta;
         normal = -blockMask * float3(istep);
 
-        float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
-        cell = int3(floor(pos));
-        if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
+        blockCell += int3(blockMask) * istep;
+        if (any(blockCell < 0) || any(blockCell >= blockGridSize)) {
             break;
         }
-
-        tCurrent = blockTCurrent;
-        float3 fineNextBoundary = floor(pos) + stepSign;
-        tMax = select(ray.direction != 0.0f, (fineNextBoundary - ray.origin) * invDir, FLT_INF);
-        voxelIndex = cell.x + cell.y * pc._voxel_grid_size.x + cell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
-
-        int3 newBlockCell = cell / int(BLOCK_SIZE);
-        blockIndex = newBlockCell.x + newBlockCell.y * blockGridSize.x + newBlockCell.z * blockGridSize.x * blockGridSize.y;
+        blockIndex += int(dot(blockMask, float3(blockIdxStep)));
     }
     return hit;
 }
@@ -284,14 +286,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 r.origin = hit.end + hit.normal * 0.01f;
 
                 bool isSpecular = mat.specularProbability >= RandomValue(rngState);
-                bonus |= (uint)isSpecular;
+                bonus = min(bonus + (uint)isSpecular, 3u);
 
                 float3 diffuseDir = normalize(hit.normal + RandomDirection(rngState));
                 float3 specularDir = Reflect(r.direction, hit.normal);
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
 
-                r.incomingLight += AmbientLight * r.color;
+                r.incomingLight += AmbientLight * r.color * (!isSpecular * 0.2);
             }
             else {
                 r.incomingLight += GetEnvironmentLight(r) * r.color;

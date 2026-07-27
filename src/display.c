@@ -33,6 +33,10 @@ void createComputePipeline(Window_t* window);
 void createComputeShader(Window_t* window);
 
 Vk_Buffer_t createHostVisibleBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
+Vk_Buffer_t createDeviceLocalBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
+void uploadBufferData(Window_t* window, VkBuffer dst, const void* data, VkDeviceSize size);
+void createWorldTexture(Window_t* window);
+void uploadWorldTextureData(Window_t* window, const void* data);
 
 void createComputeBuffers(Window_t* window);
 
@@ -435,8 +439,9 @@ void window_close(Window_t* window) {
 		vkDestroyPipelineLayout(vk->device, vk->computePipeline.layout, NULL);
 	}
 
-	destroyVkBuffer(vk->device, &vk->worldGridBuffer);
+	destroyVkImage(vk->device, &vk->worldVoxelTexture);
 	destroyVkBuffer(vk->device, &vk->worldGridMaskBuffer);
+	destroyVkBuffer(vk->device, &vk->worldGridOccBuffer);
 	destroyVkBuffer(vk->device, &vk->materialProperitesBuffer);
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		destroyVkBuffer(vk->device, &vk->cameraDataBuffer[i]);
@@ -991,9 +996,9 @@ void createSwapchain(Window_t* window) {
 void createComputePipeline(Window_t* window) {
 	Pipeline_t pipeline = {0};
 
-	VkDescriptorSetLayoutBinding bindings[6] = {0};
+	VkDescriptorSetLayoutBinding bindings[7] = {0};
 	bindings[0].binding = 1;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // 3D world voxel texture
 	bindings[0].descriptorCount = 1;
 	bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -1022,9 +1027,14 @@ void createComputePipeline(Window_t* window) {
 	bindings[5].descriptorCount = 1;
 	bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+	bindings[6].binding = 7;
+	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[6].descriptorCount = 1;
+	bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
 	VkDescriptorSetLayoutCreateInfo set_layout_info = {0};
 	set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	set_layout_info.bindingCount = 6;
+	set_layout_info.bindingCount = 7;
 	set_layout_info.pBindings = bindings;
 
 	if (vkCreateDescriptorSetLayout(window->vk_objects.device, &set_layout_info, NULL, &window->vk_objects.computeDescriptorSetLayout) != VK_SUCCESS) {
@@ -1144,18 +1154,219 @@ Vk_Buffer_t createHostVisibleBuffer(Window_t* window, VkDeviceSize size, VkBuffe
 	return buf;
 }
 
-void createComputeBuffers(Window_t* window) {
-	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-	window->vk_objects.worldGridBuffer = createHostVisibleBuffer(window, world_grid_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+Vk_Buffer_t createDeviceLocalBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage) {
+	Vk_Buffer_t buf = {0};
 
-	// one block per bit: (DIM/BLOCK_SIZE)^3 blocks, packed 8 bits/byte
+	VkBufferCreateInfo buffer_create_info = {0};
+	buffer_create_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+	buffer_create_info.size = size;
+	buffer_create_info.usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	buffer_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+	if (vkCreateBuffer(window->vk_objects.device, &buffer_create_info, NULL, &buf.buffer) != VK_SUCCESS) {
+		printf("failed to create device-local buffer.\n");
+		return buf;
+	}
+
+	VkMemoryRequirements mem_reqs;
+	vkGetBufferMemoryRequirements(window->vk_objects.device, buf.buffer, &mem_reqs);
+
+	VkMemoryAllocateInfo alloc_info = {0};
+	alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	alloc_info.allocationSize = mem_reqs.size;
+	alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &buf.bufferMemory) != VK_SUCCESS) {
+		printf("failed to allocate device-local buffer memory.\n");
+		return buf;
+	}
+	vkBindBufferMemory(window->vk_objects.device, buf.buffer, buf.bufferMemory, 0);
+
+	return buf;
+}
+
+// one-time staging upload; blocks until the copy finishes (startup-only path)
+void uploadBufferData(Window_t* window, VkBuffer dst, const void* data, VkDeviceSize size) {
+	Vk_Buffer_t staging = createHostVisibleBuffer(window, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	memcpy(staging.mapped, data, size);
+
+	VkCommandBufferAllocateInfo cmd_alloc_info = {0};
+	cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
+	cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmd_alloc_info.commandBufferCount = 1;
+
+	VkCommandBuffer cmd;
+	vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
+
+	VkCommandBufferBeginInfo begin_info = {0};
+	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cmd, &begin_info);
+
+	VkBufferCopy region = {0};
+	region.size = size;
+	vkCmdCopyBuffer(cmd, staging.buffer, dst, 1, &region);
+
+	vkEndCommandBuffer(cmd);
+
+	VkSubmitInfo submit_info = {0};
+	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &cmd;
+	vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
+	vkQueueWaitIdle(window->vk_objects.deviceQueue);
+
+	vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
+	destroyVkBuffer(window->vk_objects.device, &staging);
+}
+
+void createWorldTexture(Window_t* window) {
+	VkImageCreateInfo image_create_info = {0};
+	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	image_create_info.imageType = VK_IMAGE_TYPE_3D;
+	image_create_info.format = WORLD_TEXTURE_FORMAT;
+	image_create_info.extent.width = VOXEL_GRID_DIM;
+	image_create_info.extent.height = VOXEL_GRID_DIM;
+	image_create_info.extent.depth = VOXEL_GRID_DIM;
+	image_create_info.mipLevels = 1;
+	image_create_info.arrayLayers = 1;
+	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
+	image_create_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+	image_create_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &window->vk_objects.worldVoxelTexture.outputImage) != VK_SUCCESS) {
+		printf("failed to create world voxel texture.\n");
+		return;
+	}
+
+	VkMemoryRequirements mem_reqs;
+	vkGetImageMemoryRequirements(window->vk_objects.device, window->vk_objects.worldVoxelTexture.outputImage, &mem_reqs);
+
+	VkMemoryAllocateInfo alloc_info = {0};
+	alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	alloc_info.allocationSize = mem_reqs.size;
+	alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+
+	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &window->vk_objects.worldVoxelTexture.outputImageMemory) != VK_SUCCESS) {
+		printf("failed to allocate world voxel texture memory.\n");
+		return;
+	}
+	vkBindImageMemory(window->vk_objects.device, window->vk_objects.worldVoxelTexture.outputImage, window->vk_objects.worldVoxelTexture.outputImageMemory, 0);
+
+	VkImageViewCreateInfo view_create_info = {0};
+	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_create_info.image = window->vk_objects.worldVoxelTexture.outputImage;
+	view_create_info.viewType = VK_IMAGE_VIEW_TYPE_3D;
+	view_create_info.format = WORLD_TEXTURE_FORMAT;
+	view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	view_create_info.subresourceRange.baseMipLevel = 0;
+	view_create_info.subresourceRange.levelCount = 1;
+	view_create_info.subresourceRange.baseArrayLayer = 0;
+	view_create_info.subresourceRange.layerCount = 1;
+
+	if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &window->vk_objects.worldVoxelTexture.outputImageView) != VK_SUCCESS) {
+		printf("failed to create world voxel texture view.\n");
+		return;
+	}
+
+	printf("world voxel texture created.\n");
+}
+
+
+void uploadWorldTextureData(Window_t* window, const void* data) {
+	VkDeviceSize size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
+	Vk_Buffer_t staging = createHostVisibleBuffer(window, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	memcpy(staging.mapped, data, size);
+
+	VkCommandBufferAllocateInfo cmd_alloc_info = {0};
+	cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
+	cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmd_alloc_info.commandBufferCount = 1;
+
+	VkCommandBuffer cmd;
+	vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
+
+	VkCommandBufferBeginInfo begin_info = {0};
+	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cmd, &begin_info);
+
+	VkImageMemoryBarrier2 to_transfer = {0};
+	to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+	to_transfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+	to_transfer.srcAccessMask = 0;
+	to_transfer.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+	to_transfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+	to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.image = window->vk_objects.worldVoxelTexture.outputImage;
+	to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	to_transfer.subresourceRange.levelCount = 1;
+	to_transfer.subresourceRange.layerCount = 1;
+
+	VkDependencyInfo to_transfer_dep = {0};
+	to_transfer_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	to_transfer_dep.imageMemoryBarrierCount = 1;
+	to_transfer_dep.pImageMemoryBarriers = &to_transfer;
+	vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
+
+	VkBufferImageCopy region = {0};
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.imageSubresource.mipLevel = 0;
+	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.layerCount = 1;
+	region.imageExtent.width = VOXEL_GRID_DIM;
+	region.imageExtent.height = VOXEL_GRID_DIM;
+	region.imageExtent.depth = VOXEL_GRID_DIM;
+
+	vkCmdCopyBufferToImage(cmd, staging.buffer, window->vk_objects.worldVoxelTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+	VkImageMemoryBarrier2 to_shader_read = to_transfer;
+	to_shader_read.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+	to_shader_read.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+	to_shader_read.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+	to_shader_read.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+	to_shader_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDependencyInfo to_shader_dep = {0};
+	to_shader_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	to_shader_dep.imageMemoryBarrierCount = 1;
+	to_shader_dep.pImageMemoryBarriers = &to_shader_read;
+	vkCmdPipelineBarrier2(cmd, &to_shader_dep);
+
+	vkEndCommandBuffer(cmd);
+
+	VkSubmitInfo submit_info = {0};
+	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &cmd;
+	vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
+	vkQueueWaitIdle(window->vk_objects.deviceQueue);
+
+	vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
+	destroyVkBuffer(window->vk_objects.device, &staging);
+}
+
+void createComputeBuffers(Window_t* window) {
+	createWorldTexture(window);
+
 	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
 	VkDeviceSize world_grid_mask_size = (VkDeviceSize)blocksPerAxis * blocksPerAxis * blocksPerAxis;
 	world_grid_mask_size = (world_grid_mask_size + 7) / 8; // bits -> bytes, rounded up
-	window->vk_objects.worldGridMaskBuffer = createHostVisibleBuffer(window, world_grid_mask_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	window->vk_objects.worldGridMaskBuffer = createDeviceLocalBuffer(window, world_grid_mask_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+	VkDeviceSize world_grid_occ_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM / 8;
+	window->vk_objects.worldGridOccBuffer = createDeviceLocalBuffer(window, world_grid_occ_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 	VkDeviceSize materials_size = (VkDeviceSize)MAX_MATERIALS * sizeof(Material);
-	window->vk_objects.materialProperitesBuffer = createHostVisibleBuffer(window, materials_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	window->vk_objects.materialProperitesBuffer = createDeviceLocalBuffer(window, materials_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		window->vk_objects.cameraDataBuffer[i] = createHostVisibleBuffer(window, sizeof(CameraData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
@@ -1167,13 +1378,24 @@ void createComputeBuffers(Window_t* window) {
 
 void window_world_buffer_load(Window_t* window, World* wrld) {
 	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-	uint8_t* voxels = (uint8_t*)window->vk_objects.worldGridBuffer.mapped;
+	const uint8_t* voxels = wrld->voxels;
 
-	memcpy(voxels, wrld->voxels, world_grid_size);
+	uploadWorldTextureData(window, voxels);
 
-	uint8_t* mask = (uint8_t*)window->vk_objects.worldGridMaskBuffer.mapped;
+	// fine occupancy bits: 1 bit per voxel, linear voxel index order
+	VkDeviceSize occ_size = world_grid_size / 8;
+	uint8_t* occ = calloc(occ_size, 1);
+	for (VkDeviceSize i = 0; i < world_grid_size; i++) {
+		if (voxels[i] != 0) {
+			occ[i >> 3] |= (uint8_t)(1u << (i & 7u));
+		}
+	}
+	uploadBufferData(window, window->vk_objects.worldGridOccBuffer.buffer, occ, occ_size);
+
+	// coarse block mask, derived from the occupancy bits (any set bit in a block => solid)
 	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
-	memset(mask, 0, (VkDeviceSize)((blocksPerAxis * blocksPerAxis * blocksPerAxis + 7) / 8));
+	VkDeviceSize mask_size = ((VkDeviceSize)blocksPerAxis * blocksPerAxis * blocksPerAxis + 7) / 8;
+	uint8_t* mask = calloc(mask_size, 1);
 	for (uint32_t bz = 0; bz < blocksPerAxis; bz++) {
 		for (uint32_t by = 0; by < blocksPerAxis; by++) {
 			for (uint32_t bx = 0; bx < blocksPerAxis; bx++) {
@@ -1196,12 +1418,15 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 			}
 		}
 	}
+	uploadBufferData(window, window->vk_objects.worldGridMaskBuffer.buffer, mask, mask_size);
 
+	free(occ);
+	free(mask);
 }
 
 void window_material_buffer_load(Window_t* window, Material* mat_list) {
 
-	Material* materials = (Material*)window->vk_objects.materialProperitesBuffer.mapped;
+	Material materials[MAX_MATERIALS] = {0}; // slot 255 stays zero; material_list only has 0xFF entries
 
 	for (uint32_t i = 0; i < 0xFF; i++) {
 		materials[i] = mat_list[i];
@@ -1210,24 +1435,27 @@ void window_material_buffer_load(Window_t* window, Material* mat_list) {
 		}
 	}
 
+	uploadBufferData(window, window->vk_objects.materialProperitesBuffer.buffer, materials, sizeof(materials));
 }
 
 
 
 void createComputeDescriptorSet(Window_t* window) {
 
-	VkDescriptorPoolSize pool_sizes[3] = {0};
+	VkDescriptorPoolSize pool_sizes[4] = {0};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[0].descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT; // world grid + materials + world grid mask, per set
+	pool_sizes[0].descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT; // materials + block mask + fine occupancy, per set
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[1].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT;
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_sizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // output image + shared accum image, per set
+	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	pool_sizes[3].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT; // world voxel texture, per set
 
 	VkDescriptorPoolCreateInfo pool_info = {0};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	pool_info.maxSets = MAX_FRAMES_IN_FLIGHT;
-	pool_info.poolSizeCount = 3;
+	pool_info.poolSizeCount = 4;
 	pool_info.pPoolSizes = pool_sizes;
 
 	if (vkCreateDescriptorPool(window->vk_objects.device, &pool_info, NULL, &window->vk_objects.computeDescriptorPool) != VK_SUCCESS) {
@@ -1252,11 +1480,10 @@ void createComputeDescriptorSet(Window_t* window) {
 		return;
 	}
 
-	//static across every frame: world grid and material properties
-	VkDescriptorBufferInfo world_grid_info = {0};
-	world_grid_info.buffer = window->vk_objects.worldGridBuffer.buffer;
-	world_grid_info.offset = 0;
-	world_grid_info.range = VK_WHOLE_SIZE;
+	//static across every frame: world voxel texture and material properties
+	VkDescriptorImageInfo world_texture_info = {0};
+	world_texture_info.imageView = window->vk_objects.worldVoxelTexture.outputImageView;
+	world_texture_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkDescriptorBufferInfo material_properties_info = {0};
 	material_properties_info.buffer = window->vk_objects.materialProperitesBuffer.buffer;
@@ -1266,12 +1493,17 @@ void createComputeDescriptorSet(Window_t* window) {
 	//one camera data buffer and output image per frame-in-flight, so writing/writing into next frame's resources can't race the GPU still using last frame's
 	VkDescriptorBufferInfo camera_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
-	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 6] = {0};
+	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 7] = {0};
 
 	VkDescriptorBufferInfo world_grid_mask_info = {0};
 	world_grid_mask_info.buffer = window->vk_objects.worldGridMaskBuffer.buffer;
 	world_grid_mask_info.offset = 0;
 	world_grid_mask_info.range = VK_WHOLE_SIZE;
+
+	VkDescriptorBufferInfo world_grid_occ_info = {0};
+	world_grid_occ_info.buffer = window->vk_objects.worldGridOccBuffer.buffer;
+	world_grid_occ_info.offset = 0;
+	world_grid_occ_info.range = VK_WHOLE_SIZE;
 
 	//shared across every set: there's only one accumulation image, not one per frame-in-flight
 	VkDescriptorImageInfo accum_image_info = {0};
@@ -1286,14 +1518,14 @@ void createComputeDescriptorSet(Window_t* window) {
 		image_infos[i].imageView = window->vk_objects.outputImageRes[i].outputImageView;
 		image_infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-		VkWriteDescriptorSet *frame_writes = &writes[i * 6];
+		VkWriteDescriptorSet *frame_writes = &writes[i * 7];
 
 		frame_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[0].dstSet = window->vk_objects.computeDescriptorSet[i];
 		frame_writes[0].dstBinding = 1;
 		frame_writes[0].descriptorCount = 1;
-		frame_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		frame_writes[0].pBufferInfo = &world_grid_info;
+		frame_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		frame_writes[0].pImageInfo = &world_texture_info;
 
 		frame_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[1].dstSet = window->vk_objects.computeDescriptorSet[i];
@@ -1329,9 +1561,16 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[5].descriptorCount = 1;
 		frame_writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		frame_writes[5].pBufferInfo = &world_grid_mask_info;
+
+		frame_writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		frame_writes[6].dstSet = window->vk_objects.computeDescriptorSet[i];
+		frame_writes[6].dstBinding = 7;
+		frame_writes[6].descriptorCount = 1;
+		frame_writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		frame_writes[6].pBufferInfo = &world_grid_occ_info;
 	}
 
-	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 6, writes, 0, NULL);
+	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 7, writes, 0, NULL);
 
 	printf("compute descriptor set created.\n");
 }
