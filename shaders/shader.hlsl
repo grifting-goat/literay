@@ -41,7 +41,7 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 600.0f;
+static const float MAX_RAY_DISTANCE = 400.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 
@@ -51,9 +51,8 @@ static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
 static const float3 SkyColourZenith = float3(0.2f, 0.4f, 0.9f);
 static const float3 SunDirection = float3(0.318f, 0.848f, 0.424f);
-static const float3 SunColor = float3(1.0f, 0.992f, 0.957f);
 static const float SunFocus = 500.0f;
-static const float SunIntensity = 6.0f;
+static const float SunIntensity = 0.5f;
 
 static const float3 AmbientLight = float3(0.05f, 0.05f, 0.05f);
 
@@ -275,6 +274,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             if (hit.mat_type != 0) {
                 Material mat = materials[hit.mat_type];
 
+                //shadow ray
+                if (bounces == 0) {
+                    Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), SunDirection);
+                    Hit shadowHit = CastRay(shadow);
+
+                    if (shadowHit.mat_type == 0) { 
+                        float sunAmount = saturate(dot(hit.normal, SunDirection));
+                        r.incomingLight += SunIntensity * sunAmount * mat.color.rgb * r.color;
+                    }
+                }
+
                 int3 hitCell = int3(floor(hit.end - hit.normal * 0.5f));
                 uint noiseState = HashVoxelCell(hitCell);
                 float3 colorNoise = float3(RandomValue(noiseState), RandomValue(noiseState), RandomValue(noiseState)) - 0.5f;
@@ -293,7 +303,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
 
-                r.incomingLight += AmbientLight * r.color * (!isSpecular * 0.2);
+                r.incomingLight += AmbientLight * r.color * (!isSpecular * 0.2); //so specular doesnt add to much ambient light
             }
             else {
                 r.incomingLight += GetEnvironmentLight(r) * r.color;

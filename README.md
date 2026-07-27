@@ -52,3 +52,6 @@ eventually I want to develop a PVP and exploration based SMP game but im writing
 
 
 ![Water](res/water.png)
+
+
+![Ship](res/ship.png)
