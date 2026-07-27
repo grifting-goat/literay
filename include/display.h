@@ -118,7 +118,7 @@ Window_t window_create();
 
 void window_attach_device(Window_t* window);
 
-void window_render(Window_t* window, Camera* cam);
+void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 
 void window_world_buffer_load(Window_t* window, World* wrld);
 

@@ -18,6 +18,7 @@ typedef enum {
     STATUE,
     BOAT,
     TREE,
+    SHIMMER,
     OUT,
     STRUCTURE_COUNT
 

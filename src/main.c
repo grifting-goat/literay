@@ -57,6 +57,8 @@ int main() {
 	int fpsFrameCount = 0;
 	const double fpsUpdateInterval = 0.2; // 5 Hz
 
+	Vector_t sun_direction = vector_create(0.318f, 0.848f, 0.424f);
+
     while (!window_should_close(&window)) {
         window_poll_events(&window);
 
@@ -95,7 +97,7 @@ int main() {
 
         camera_position_controller(&window, &cam, frameTime);
 
-        window_render(&window, &cam);
+        window_render(&window, &cam, sun_direction);
 
     }
 

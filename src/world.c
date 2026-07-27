@@ -203,16 +203,17 @@ static Structure_t create_sphere_structure(uint32_t diameter, uint8_t material) 
 
 
 void structure_list_create() {
-    uint32_t light_cube_dim[3] = {6, 6, 6};
+    uint32_t light_cube_dim[3] = {2, 2, 2};
 
     structure_list[MIRROR_PLANE] = create_plane_structure(50, 50, MIRROR);
     structure_list[VARNISH_PLANE] = create_plane_structure(40, 40, BLACK_VARNISH);
     structure_list[MIRROR_BALL] = create_sphere_structure(40, MIRROR);
     structure_list[LIGHT_CUBE] = create_cube_structure(light_cube_dim, YELLOW_LIGHT);
-    structure_list[CASTLE] = structure_load_vox("./res/models/castle.vox", STONE, false);
+    structure_list[CASTLE] = structure_load_vox("./res/models/castle.vox", COPPER, false);
     structure_list[STATUE] = structure_load_vox("./res/models/sculpt2.vox", MARBLE, false);
-    structure_list[BOAT] = structure_load_vox("./res/models/boat.vox", COPPER, true);
+    structure_list[BOAT] = structure_load_vox("./res/models/boat.vox",  AIR, true);
     structure_list[TREE] = structure_load_vox("./res/models/tree.vox", AIR, true);
+    structure_list[SHIMMER] = structure_load_vox("./res/models/bronze.vox", COPPER, false);
     structure_list[OUT] = structure_load_vox("./res/models/out.vox", COPPER, true);
 }
 
@@ -308,15 +309,15 @@ void world_generate_structures(World* wrld) {
                 world_structure_place(wrld, (StructureTypes)MIRROR_BALL, origin, 0, 0, (float)(rand() % 6) * 0.1f + 0.5f, true);
             }
 
-            if (0 /*!rand() % 20000*/) {
+            if (!rand() % 2000) {
 
-                uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 10 + 3;
+                uint32_t y = ymap[x + z * wrld->dimensions[1]]+1;
                 uint32_t origin[3] = {x, y, z};
                 world_structure_place(wrld, (StructureTypes)LIGHT_CUBE, origin, 0, 0, 1.0f, true);
 
             }
 
-            if (!rand() % 1000) {
+            if (!rand() % 300) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]];
                 uint32_t origin[3] = {x, y, z};
                 if (y > wrld->perlin_params.sea_level) {
@@ -342,7 +343,12 @@ void world_generate_structures(World* wrld) {
     uint32_t boat_origin[3] = {wrld->dimensions[0] * 0.6f, wrld->dimensions[1] * 0.48f, wrld->dimensions[2] * 0.22f};
     world_structure_place(wrld, (StructureTypes)BOAT, boat_origin, 0, 0, 1.0f, false);
 
-    uint32_t out_origin[3] = {wrld->dimensions[0] * 0.2f, wrld->dimensions[1] * 0.48f, wrld->dimensions[2] * 0.8f};
+    uint32_t shimmer_origin[3] = {wrld->dimensions[0] * 0.3f, wrld->dimensions[1] * 0.45f, wrld->dimensions[2] * 0.7f};
+    shimmer_origin[1] = ymap[shimmer_origin[0] + shimmer_origin[2] * wrld->dimensions[1]];
+    //world_structure_place(wrld, (StructureTypes)SHIMMER, shimmer_origin, 0, 1, 1.0f, false);
+
+    uint32_t out_origin[3] = {wrld->dimensions[0] * 0.17f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.82f};
+    out_origin[1] = ymap[out_origin[0] + out_origin[2] * wrld->dimensions[1]];
     world_structure_place(wrld, (StructureTypes)OUT, out_origin, 0, 0, 1.0f, false);
 
 }

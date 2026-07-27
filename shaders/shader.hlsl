@@ -37,6 +37,9 @@ struct PushConstants {
     uint accumCount; // fills the slot int3 below needs padding for anyway
 
     int3 _voxel_grid_size;
+    float _sun_dir_pad; // fills the slot sun_direction below needs padding for anyway, same trick as accumCount above
+
+    float3 sun_direction; // pre-normalized on the CPU side before upload
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -50,7 +53,6 @@ static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display
 static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
 static const float3 SkyColourZenith = float3(0.2f, 0.4f, 0.9f);
-static const float3 SunDirection = float3(0.318f, 0.848f, 0.424f);
 static const float SunFocus = 500.0f;
 static const float SunIntensity = 0.5f;
 
@@ -158,7 +160,7 @@ float3 GetEnvironmentLight(Ray ray) {
 
     float skyGradientT = pow(smoothstep(0, 0.4, ray.direction.y), 0.35);
     float3 skyGradient = lerp(SkyColourHorizon, SkyColourZenith, skyGradientT);
-    float sun = pow(max(0, dot(ray.direction, SunDirection)), SunFocus) * SunIntensity;
+    float sun = pow(max(0, dot(ray.direction, pc.sun_direction)), SunFocus) * SunIntensity;
 
     return skyGradient + sun;
 }
@@ -276,11 +278,11 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
                 //shadow ray
                 if (bounces == 0) {
-                    Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), SunDirection);
+                    Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), pc.sun_direction);
                     Hit shadowHit = CastRay(shadow);
 
                     if (shadowHit.mat_type == 0) { 
-                        float sunAmount = saturate(dot(hit.normal, SunDirection));
+                        float sunAmount = saturate(dot(hit.normal, pc.sun_direction));
                         r.incomingLight += SunIntensity * sunAmount * mat.color.rgb * r.color;
                     }
                 }

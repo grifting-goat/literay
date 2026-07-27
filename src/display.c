@@ -123,7 +123,7 @@ void window_camera_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 	ubo->tan_fov_h = tanf(c->fov_h);
 }
 
-void window_render(Window_t* window, Camera* cam) {
+void window_render(Window_t* window, Camera* cam, Vector_t sun_direction) {
 	static uint64_t timeline_value = 0;
 
 
@@ -213,6 +213,12 @@ void window_render(Window_t* window, Camera* cam) {
 	push_constants._voxel_grid_size[2] = (int)VOXEL_GRID_DIM;
 	push_constants.frame_idx = (unsigned int)frame_id;
 	push_constants.accumCount = window->vk_objects.accumCount;
+
+	float sun_mag = vector_magnitude(&sun_direction);
+	push_constants.sun_direction[0] = sun_direction.x / sun_mag;
+	push_constants.sun_direction[1] = sun_direction.y / sun_mag;
+	push_constants.sun_direction[2] = sun_direction.z / sun_mag;
+
 	vkCmdPushConstants(res->commandBuffer, window->vk_objects.computePipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &push_constants);
 
 	uint32_t group_count_x = (window->vk_objects.swapchain_data.swapchainWidth + 7) / 8;

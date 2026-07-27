@@ -26,6 +26,9 @@ typedef struct {
     unsigned int accumCount; // fills the slot int3 below needs padding for anyway; keeps CPU/GPU layouts matched
 
     int _voxel_grid_size[3];
+    float _sun_dir_pad; // fills the slot sun_direction below needs padding for anyway, same trick as accumCount above
+
+    float sun_direction[3];
 } PushConstants;
 
 

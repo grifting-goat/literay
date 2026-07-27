@@ -150,10 +150,9 @@ Material material_list[0xFF] = {
 };
 
 void material_palette_create() {
-    // 16 hues x 4 values x 2 saturations = 128; saturation is kept at 0.55+ always, so no
-    // nearest-match can land on a washed-out/grey entry the way a plain linear RGB grid would
+
     static const float VALUES[4] = {0.3f, 0.55f, 0.8f, 1.0f};
-    static const float SATURATIONS[2] = {0.55f, 0.9f};
+    static const float SATURATIONS[2] = {0.55f, 0.95f};
 
     for (int i = 0; i < PALETTE_MATERIAL_COUNT; i++) {
         int hueIdx = i % 16;
