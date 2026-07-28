@@ -1432,7 +1432,7 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 
 void window_material_buffer_load(Window_t* window, Material* mat_list) {
 
-	Material materials[MAX_MATERIALS] = {0}; // slot 255 stays zero; material_list only has 0xFF entries
+	Material materials[MAX_MATERIALS] = {0};
 
 	for (uint32_t i = 0; i < 0xFF; i++) {
 		materials[i] = mat_list[i];
@@ -1486,7 +1486,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		return;
 	}
 
-	//static across every frame: world voxel texture and material properties
+	//static across every frame
 	VkDescriptorImageInfo world_texture_info = {0};
 	world_texture_info.imageView = window->vk_objects.worldVoxelTexture.outputImageView;
 	world_texture_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1496,7 +1496,7 @@ void createComputeDescriptorSet(Window_t* window) {
 	material_properties_info.offset = 0;
 	material_properties_info.range = VK_WHOLE_SIZE;
 
-	//one camera data buffer and output image per frame-in-flight, so writing/writing into next frame's resources can't race the GPU still using last frame's
+
 	VkDescriptorBufferInfo camera_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 7] = {0};
@@ -1511,7 +1511,7 @@ void createComputeDescriptorSet(Window_t* window) {
 	world_grid_occ_info.offset = 0;
 	world_grid_occ_info.range = VK_WHOLE_SIZE;
 
-	//shared across every set: there's only one accumulation image, not one per frame-in-flight
+	//shared across every set
 	VkDescriptorImageInfo accum_image_info = {0};
 	accum_image_info.imageView = window->vk_objects.accumImageRes.outputImageView;
 	accum_image_info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;

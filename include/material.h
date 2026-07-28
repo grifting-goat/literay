@@ -3,7 +3,7 @@
 
 #include "compute_res.h"
 
-#define MAX_MATERIAL_COUNT 0xFF
+#define MAX_MATERIAL_COUNT 256U
 
 typedef enum {
     AIR = 0,

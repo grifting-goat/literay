@@ -81,12 +81,12 @@ typedef struct {
     VkCommandPool commandPool;
 
     VkSemaphore timelineSemaphore;
-    VkSemaphore computeTimelineSemaphore; // signaled right after the compute dispatch, not the whole frame
+    VkSemaphore computeTimelineSemaphore; // signaled right after the compute dispatch
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
 	uint32_t frameCounter;
 
     Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
-    Vk_Image_t accumImageRes; // single, persistent across frames (not double-buffered like outputImageRes)
+    Vk_Image_t accumImageRes; // single, persistent across frames
     uint32_t accumCount;
     VkShaderModule computeShader;
     Pipeline_t computePipeline;
@@ -94,7 +94,7 @@ typedef struct {
     VkDescriptorPool computeDescriptorPool;
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
-    Vk_Image_t worldVoxelTexture; // 3D R8_UINT; optimal tiling keeps 3D-adjacent voxels cache-adjacent
+    Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
     Vk_Buffer_t worldGridMaskBuffer;
     Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];

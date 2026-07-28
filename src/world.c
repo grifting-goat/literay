@@ -305,13 +305,16 @@ void world_generate_structures(World* wrld) {
 
     for (uint32_t x = 0; x < wrld->dimensions[0]; x++) {
         for (uint32_t z = 0; z < wrld->dimensions[2]; z++) {
-            if (!rand() % 20000) {
+            rand();
+            rand();
+            rand();
+            if (!rand() % 25000) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 10;
                 uint32_t origin[3] = {x, y, z};
                 world_structure_place(wrld, (StructureTypes)MIRROR_BALL, origin, 0, 0, (float)(rand() % 6) * 0.1f + 0.5f, true);
             }
 
-            if (!rand() % 15000) {
+            if (!rand() % 20000) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 4;
                 uint32_t origin[3] = {x, y, z};
                 world_structure_place(wrld, (StructureTypes)RUBY_BALL, origin, 0, 0, (float)(rand() % 8) * 0.1f + 0.3f, false);
@@ -325,9 +328,9 @@ void world_generate_structures(World* wrld) {
 
             }
 
-            if (!rand() % 500) {
+            if (!rand() % 800) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]];
-                uint32_t origin[3] = {x, y, z};
+                uint32_t origin[3] = {x, y-2, z};
                 if (y > wrld->perlin_params.sea_level) {
                     world_structure_place(wrld, (StructureTypes)TREE, origin, 0, rand() % 4, 2.0f, false);
                 }

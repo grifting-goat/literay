@@ -149,7 +149,7 @@ float3 DDAStepMask(float3 tMax) {
 
 
 //https://github.com/SebLague/Ray-Tracing
-float3 GetEnvironmentLight(Ray ray) {
+float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time of day
 
     if (!EnvironmentEnabled) {return 0;}
 
