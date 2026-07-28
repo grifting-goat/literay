@@ -136,15 +136,37 @@ static uint8_t vox_match_palette_color(uint8_t r, uint8_t g, uint8_t b) {
 
     uint8_t best = PALETTE_MATERIAL_BASE;
     float bestDist = FLT_MAX;
-    for (int i = 0; i < PALETTE_MATERIAL_COUNT; i++) {
-        Material* m = &material_list[PALETTE_MATERIAL_BASE + i];
+    for (int i = PALETTE_MATERIAL_BASE; i < MATERIAL_COUNT; i++) {
+        Material* m = &material_list[i];
         float dr = m->color[0] - rf;
         float dg = m->color[1] - gf;
         float db = m->color[2] - bf;
         float dist = dr * dr + dg * dg + db * db;
         if (dist < bestDist) {
             bestDist = dist;
-            best = (uint8_t)(PALETTE_MATERIAL_BASE + i);
+            best = (uint8_t)(i);
+        }
+    }
+    return best;
+}
+
+static uint8_t vox_match_light_color(uint8_t r, uint8_t g, uint8_t b) {
+    static const MaterialTypes lights[] = { WHITE_LIGHT, RED_LIGHT, GREEN_LIGHT, BLUE_LIGHT, YELLOW_LIGHT };
+    float rf = r / 255.0f;
+    float gf = g / 255.0f;
+    float bf = b / 255.0f;
+
+    uint8_t best = WHITE_LIGHT;
+    float bestDist = FLT_MAX;
+    for (size_t i = 0; i < sizeof(lights) / sizeof(lights[0]); i++) {
+        Material* m = &material_list[lights[i]];
+        float dr = m->color[0] - rf;
+        float dg = m->color[1] - gf;
+        float db = m->color[2] - bf;
+        float dist = dr * dr + dg * dg + db * db;
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = (uint8_t)lights[i];
         }
     }
     return best;
@@ -231,6 +253,8 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     uint8_t vox_palette[256][4] = {0}; // index i holds the RGBA for colorIndex i+1 (see vox spec's off-by-one)
     bool has_palette = false;
 
+    bool vox_emissive[256] = {0}; // indexed directly by material id, which shares numbering with colorIndex
+
     char chunk_id[4];
     int32_t content_size, children_size;
     while (fread(chunk_id, 1, 4, fp) == 4) {
@@ -241,6 +265,23 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
         if (memcmp(chunk_id, "RGBA", 4) == 0) {
             fread(vox_palette, 1, 256 * 4, fp);
             has_palette = true;
+        }
+        else if (memcmp(chunk_id, "MATL", 4) == 0) {
+            int32_t material_id = vox_read_i32(fp);
+            int32_t num_pairs = vox_read_i32(fp);
+            bool is_emit = false;
+            float emit = 0.0f;
+            for (int32_t i = 0; i < num_pairs; i++) {
+                char* key = vox_read_string(fp);
+                char* value = vox_read_string(fp);
+                if (strcmp(key, "_type") == 0 && strcmp(value, "_emit") == 0) { is_emit = true; }
+                else if (strcmp(key, "_emit") == 0) { emit = (float)atof(value); }
+                free(key);
+                free(value);
+            }
+            if (material_id >= 0 && material_id < 256) {
+                vox_emissive[material_id] = is_emit && emit >= 1.0f;
+            }
         }
         else if (memcmp(chunk_id, "SIZE", 4) == 0 && num_models < VOX_MAX_MODELS) {
             fread(models[num_models].dim, 4, 3, fp);
@@ -383,6 +424,13 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
             if (matchPalette && has_palette && colorIndex >= 1) {
                 uint8_t* rgba = vox_palette[colorIndex - 1];
                 material = vox_match_palette_color(rgba[0], rgba[1], rgba[2]);
+            }
+            if (colorIndex < 256 && vox_emissive[colorIndex]) { // fully emissive materials override color, matched to nearest light material
+                material = WHITE_LIGHT;
+                if (has_palette && colorIndex >= 1) {
+                    uint8_t* rgba = vox_palette[colorIndex - 1];
+                    material = vox_match_light_color(rgba[0], rgba[1], rgba[2]);
+                }
             }
             structure.voxels[idx] = material;
         }

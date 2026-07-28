@@ -14,11 +14,13 @@ typedef enum {
     VARNISH_PLANE,
     LIGHT_CUBE,
     MIRROR_BALL,
+    RUBY_BALL,
     CASTLE,
     STATUE,
     BOAT,
     TREE,
     SHIMMER,
+    CUTE,
     OUT,
     STRUCTURE_COUNT
 

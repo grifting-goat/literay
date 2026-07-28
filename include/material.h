@@ -3,7 +3,7 @@
 
 #include "compute_res.h"
 
-#define PALETTE_MATERIAL_COUNT 128
+#define MAX_MATERIAL_COUNT 0xFF
 
 typedef enum {
     AIR = 0,
@@ -23,8 +23,9 @@ typedef enum {
     SAND,
     MARBLE,
     COPPER,
+    RUBY,
     PALETTE_MATERIAL_BASE,
-    MATERIAL_COUNT = PALETTE_MATERIAL_BASE + PALETTE_MATERIAL_COUNT
+    MATERIAL_COUNT = MAX_MATERIAL_COUNT
 
 } MaterialTypes;
 

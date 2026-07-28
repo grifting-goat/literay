@@ -147,6 +147,14 @@ Material material_list[0xFF] = {
         .specularProbability = 0.9f,
         .noise = 0.02f
     },
+    [RUBY] = {
+        .color = {0.929f, 0.235f, 0.149f, 1.0f},
+        .emissionColor = {0.929f, 0.235f, 0.149f, 1.0f},
+        .emissionStrength = 1.0f,
+        .smoothness = 0.8f,
+        .specularProbability = 0.9f,
+        .noise = 0.05f
+    },
 };
 
 void material_palette_create() {
@@ -154,7 +162,7 @@ void material_palette_create() {
     static const float VALUES[4] = {0.3f, 0.55f, 0.8f, 1.0f};
     static const float SATURATIONS[2] = {0.55f, 0.95f};
 
-    for (int i = 0; i < PALETTE_MATERIAL_COUNT; i++) {
+    for (int i = PALETTE_MATERIAL_BASE; i < MATERIAL_COUNT; i++) {
         int hueIdx = i % 16;
         int valIdx = (i / 16) % 4;
         int satIdx = i / 64;
@@ -174,6 +182,6 @@ void material_palette_create() {
         m.specularProbability = 0.0f;
         m.noise = 0.01f;
 
-        material_list[PALETTE_MATERIAL_BASE + i] = m;
+        material_list[i] = m;
     }
 }

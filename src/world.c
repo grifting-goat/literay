@@ -208,12 +208,14 @@ void structure_list_create() {
     structure_list[MIRROR_PLANE] = create_plane_structure(50, 50, MIRROR);
     structure_list[VARNISH_PLANE] = create_plane_structure(40, 40, BLACK_VARNISH);
     structure_list[MIRROR_BALL] = create_sphere_structure(40, MIRROR);
+    structure_list[RUBY_BALL] = create_sphere_structure(30, RUBY);
     structure_list[LIGHT_CUBE] = create_cube_structure(light_cube_dim, YELLOW_LIGHT);
     structure_list[CASTLE] = structure_load_vox("./res/models/castle.vox", COPPER, false);
     structure_list[STATUE] = structure_load_vox("./res/models/sculpt2.vox", MARBLE, false);
     structure_list[BOAT] = structure_load_vox("./res/models/boat.vox",  AIR, true);
     structure_list[TREE] = structure_load_vox("./res/models/tree.vox", AIR, true);
     structure_list[SHIMMER] = structure_load_vox("./res/models/bronze.vox", COPPER, false);
+    structure_list[CUTE] = structure_load_vox("./res/models/cute.vox", COPPER, true);
     structure_list[OUT] = structure_load_vox("./res/models/out.vox", COPPER, true);
 }
 
@@ -240,7 +242,7 @@ void world_structure_place(World* wrld, StructureTypes type, uint32_t origin[3],
         if (w != nAxis) { sideWorldAxis[sideCount++] = w; }
     }
 
-    // 4 in-plane 90-degree spins of (local X, local Z) into (sideWorldAxis[0], sideWorldAxis[1])
+
     static const int spinLocalAxis[4][2] = { {0, 2}, {2, 0}, {0, 2}, {2, 0} };
     static const int spinSign[4][2] = { {1, 1}, {-1, 1}, {-1, -1}, {1, -1} };
     const int* sla = spinLocalAxis[rotation % 4];
@@ -303,21 +305,27 @@ void world_generate_structures(World* wrld) {
 
     for (uint32_t x = 0; x < wrld->dimensions[0]; x++) {
         for (uint32_t z = 0; z < wrld->dimensions[2]; z++) {
-            if (!rand() % 12000) {
+            if (!rand() % 20000) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 10;
                 uint32_t origin[3] = {x, y, z};
                 world_structure_place(wrld, (StructureTypes)MIRROR_BALL, origin, 0, 0, (float)(rand() % 6) * 0.1f + 0.5f, true);
+            }
+
+            if (!rand() % 15000) {
+                uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 4;
+                uint32_t origin[3] = {x, y, z};
+                world_structure_place(wrld, (StructureTypes)RUBY_BALL, origin, 0, 0, (float)(rand() % 8) * 0.1f + 0.3f, false);
             }
 
             if (!rand() % 2000) {
 
                 uint32_t y = ymap[x + z * wrld->dimensions[1]]+1;
                 uint32_t origin[3] = {x, y, z};
-                world_structure_place(wrld, (StructureTypes)LIGHT_CUBE, origin, 0, 0, 1.0f, true);
+                //world_structure_place(wrld, (StructureTypes)LIGHT_CUBE, origin, 0, 0, 1.0f, true);
 
             }
 
-            if (!rand() % 300) {
+            if (!rand() % 500) {
                 uint32_t y = ymap[x + z * wrld->dimensions[1]];
                 uint32_t origin[3] = {x, y, z};
                 if (y > wrld->perlin_params.sea_level) {
@@ -350,6 +358,10 @@ void world_generate_structures(World* wrld) {
     uint32_t out_origin[3] = {wrld->dimensions[0] * 0.17f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.82f};
     out_origin[1] = ymap[out_origin[0] + out_origin[2] * wrld->dimensions[1]];
     world_structure_place(wrld, (StructureTypes)OUT, out_origin, 0, 0, 1.0f, false);
+
+    uint32_t cute_origin[3] = {wrld->dimensions[0] * 0.45f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.6f};
+    cute_origin[1] = ymap[cute_origin[0] + cute_origin[2] * wrld->dimensions[1]];
+    world_structure_place(wrld, (StructureTypes)CUTE, cute_origin, 0, 1, 1.0f, false);
 
 }
 

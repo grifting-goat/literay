@@ -251,6 +251,12 @@ Hit CastStaticRay(Ray ray) {
 
 Hit CastDynamicRay(Ray ray) {
 
+    Hit hit;
+    hit.mat_type = 0;
+    hit.dist = FLT_INF;
+    hit.end = float3(0.0f, 0.0f, 0.0f);
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+
     
 
 }
