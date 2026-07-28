@@ -29,6 +29,13 @@ typedef struct {
     float _sun_dir_pad; // fills the slot sun_direction below needs padding for anyway, same trick as accumCount above
 
     float sun_direction[3];
+    float entity_yaw;
+
+    float entity_pos[3];
+    float _entity_pad;
+
+    int entity_dim[3]; // all zero = no entity
+    float entity_scale;
 } PushConstants;
 
 

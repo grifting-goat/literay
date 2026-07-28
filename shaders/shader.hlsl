@@ -1,6 +1,7 @@
 [[vk::binding(1, 0)]] Texture3D<uint> voxelsIn; // material ids, R8_UINT
 [[vk::binding(6, 0)]] ByteAddressBuffer voxelsMaskIn;
 [[vk::binding(7, 0)]] ByteAddressBuffer voxelsOccIn; // 1 bit per voxel
+[[vk::binding(8, 0)]] ByteAddressBuffer entityVoxelsIn; // 1 material byte per voxel, entity-local grid
 
 struct Material {
     float4 color;
@@ -11,6 +12,7 @@ struct Material {
     float noise;
 };
 [[vk::binding(2, 0)]] StructuredBuffer<Material> materials;
+[[vk::binding(9, 0)]] StructuredBuffer<Material> entityMaterials; // separate palette entities read from
 
 [[vk::binding(3, 0)]]
 cbuffer CameraData {
@@ -40,6 +42,13 @@ struct PushConstants {
     float _sun_dir_pad; // fills the slot sun_direction below needs padding for anyway, same trick as accumCount above
 
     float3 sun_direction; // pre-normalized on the CPU side before upload
+    float entity_yaw;
+
+    float3 entity_pos;
+    float _entity_pad;
+
+    int3 entity_dim; // all zero = no entity
+    float entity_scale;
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -71,6 +80,7 @@ struct Hit {
     float3 end;
     float3 normal;
     uint mat_type;
+    bool isEntity;
 };
 
 //RNG //https://github.com/SebLague/Ray-Tracing
@@ -137,6 +147,11 @@ uint ReadVoxel(int3 cell) {
     return voxelsIn.Load(int4(cell, 0));
 }
 
+uint ReadEntityVoxel(uint index) {
+    uint word = entityVoxelsIn.Load(index & ~3u);
+    return (word >> ((index & 3u) * 8u)) & 0xFFu;
+}
+
 
 float3 DDAStepMask(float3 tMax) {
     float3 mask;
@@ -165,13 +180,14 @@ float3 GetEnvironmentLight(Ray ray) {
     return skyGradient + sun;
 }
 
-Hit CastRay(Ray ray) {
+Hit CastVoxelRay(Ray ray) {
 
     Hit hit;
     hit.mat_type = 0;
     hit.dist = FLT_INF;
     hit.end = float3(0.0f, 0.0f, 0.0f);
     hit.normal = float3(0.0f, 0.0f, 0.0f);
+    hit.isEntity = false;
 
     int3 cell = int3(floor(ray.origin));
     if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
@@ -246,6 +262,88 @@ Hit CastRay(Ray ray) {
     return hit;
 }
 
+// ray is transformed into the entity's local axis-aligned frame (translate to pivot at the
+// grid's base center, then rotate by -yaw about Y), AABB-rejected, then standard fine DDA
+Hit CastEntityRay(Ray ray) {
+    Hit hit;
+    hit.mat_type = 0;
+    hit.dist = FLT_INF;
+    hit.end = float3(0.0f, 0.0f, 0.0f);
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+    hit.isEntity = false;
+
+    int3 dim = pc.entity_dim;
+    if (dim.x == 0) {
+        return hit;
+    }
+
+    float s, c;
+    sincos(-pc.entity_yaw, s, c);
+
+    float3 rel = ray.origin - pc.entity_pos;
+    float3 rotatedRel = float3(c * rel.x - s * rel.z, rel.y, s * rel.x + c * rel.z);
+    float3 rotatedDir = float3(c * ray.direction.x - s * ray.direction.z, ray.direction.y, s * ray.direction.x + c * ray.direction.z);
+    float3 lo = rotatedRel / pc.entity_scale + float3(dim.x * 0.5f, 0.0f, dim.z * 0.5f);
+    float3 ld = rotatedDir / pc.entity_scale;
+
+    float3 invD = rcp(ld);
+    float3 t0 = (0.0f - lo) * invD;
+    float3 t1 = (float3(dim) - lo) * invD;
+    float3 tmin3 = min(t0, t1);
+    float3 tmax3 = max(t0, t1);
+    float tEnter = max(max(tmin3.x, tmin3.y), max(tmin3.z, 0.0f));
+    float tExit = min(min(tmax3.x, tmax3.y), tmax3.z) - 0.001f;
+    if (tExit <= tEnter) {
+        return hit;
+    }
+
+    int3 istep = int3(sign(ld));
+    float3 tDelta = abs(invD);
+    float3 stepSign = max(sign(ld), 0.0f);
+
+    float3 p = lo + ld * (tEnter + 0.001f);
+    int3 cell = clamp(int3(floor(p)), int3(0, 0, 0), dim - 1);
+    float3 tMax = select(ld != 0.0f, (float3(cell) + stepSign - lo) * invD, FLT_INF);
+    float tCurrent = tEnter;
+    float3 entryMask = select(tmin3 == tEnter, 1.0f, 0.0f);
+    float3 lnormal = -entryMask * float3(istep);
+
+    while (tCurrent < tExit) {
+        uint idx = uint(cell.x + cell.y * dim.x + cell.z * dim.x * dim.y);
+        uint mat = ReadEntityVoxel(idx);
+        if (mat != 0) {
+            hit.mat_type = mat;
+            hit.dist = tCurrent;
+            hit.end = ray.origin + ray.direction * tCurrent;
+            hit.normal = float3(c * lnormal.x + s * lnormal.z, lnormal.y, -s * lnormal.x + c * lnormal.z);
+            hit.isEntity = true;
+            return hit;
+        }
+
+        float3 mask = DDAStepMask(tMax);
+        tCurrent = dot(mask, tMax);
+        tMax += mask * tDelta;
+        lnormal = -mask * float3(istep);
+        cell += int3(mask) * istep;
+        if (any(cell < 0) || any(cell >= dim)) {
+            break;
+        }
+    }
+    return hit;
+}
+
+Hit CastRay(Ray ray, bool testEntity) {
+    Hit worldHit = CastVoxelRay(ray);
+    if (!testEntity) {
+        return worldHit;
+    }
+    Hit entityHit = CastEntityRay(ray);
+    if (entityHit.dist < worldHit.dist) {
+        return entityHit;
+    }
+    return worldHit;
+}
+
 float3 Reflect(float3 dir, float3 normal) {
     return dir - 2 * dot(dir, normal) * normal;
 }
@@ -272,14 +370,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
         Ray r = CreateCameraRay(x, y);
         for (uint bounces = 0; bounces < MAX_BOUNCES + bonus; bounces++) {
-            Hit hit = CastRay(r);
+            Hit hit = CastRay(r, bounces != 0);
             if (hit.mat_type != 0) {
                 Material mat = materials[hit.mat_type];
+                if (hit.isEntity) { mat = entityMaterials[hit.mat_type]; }
 
                 //shadow ray
-                if (bounces == 0) {
+                if (bounces == 0 || (bonus && bounces == 1)) { //only do on first ray or first spec ray
                     Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), pc.sun_direction);
-                    Hit shadowHit = CastRay(shadow);
+                    Hit shadowHit = CastRay(shadow, true);
 
                     if (shadowHit.mat_type == 0) { 
                         float sunAmount = saturate(dot(hit.normal, pc.sun_direction));
@@ -305,7 +404,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
 
-                r.incomingLight += AmbientLight * r.color * (!isSpecular * 0.2); //so specular doesnt add to much ambient light
+                r.incomingLight += AmbientLight * r.color * (!isSpecular); //so specular doesnt add to ambient light
             }
             else {
                 r.incomingLight += GetEnvironmentLight(r) * r.color;

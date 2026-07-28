@@ -2,3 +2,11 @@
 /bin
 /.vscode
 /.claude
+
+/res/models/*
+!/res/models/boat.vox
+!/res/models/vike.vox
+!/res/models/tree.vox
+!/res/models/sculpt2.vox
+!/res/models/out.vox
+!/res/models/castle.vox

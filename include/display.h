@@ -24,6 +24,7 @@
 
 #define VOXEL_GRID_DIM 512U
 #define VOXEL_MASK_BLOCK_SIZE 8U // match BLOCK_SIZE in shader
+#define MAX_ENTITY_VOXEL_DIM 256U
 
 
 #include "compute_res.h"
@@ -99,6 +100,10 @@ typedef struct {
     Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
+    Vk_Buffer_t entityMaterialPropertiesBuffer;
+
+    Vk_Buffer_t entityVoxelBuffer;
+    uint32_t entityDim[3];
 
 } Vk_Objects_t;
 
@@ -118,11 +123,15 @@ Window_t window_create();
 
 void window_attach_device(Window_t* window);
 
-void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
+void window_render(Window_t* window, Camera* cam, Vector_t sun_direction, Vector_t entity_pos, float entity_yaw, float entity_scale);
 
 void window_world_buffer_load(Window_t* window, World* wrld);
 
+void window_entity_buffer_load(Window_t* window, Structure_t* entity);
+
 void window_material_buffer_load(Window_t* window, Material* mat_list);
+
+void window_entity_material_buffer_load(Window_t* window, Material* mat_list);
 
 void window_close(Window_t* window);
 

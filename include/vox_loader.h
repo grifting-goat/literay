@@ -128,22 +128,22 @@ static void vox_mat3_apply(int m[3][3], const int32_t v[3], int32_t out[3]) {
     }
 }
 
-static uint8_t vox_match_palette_color(uint8_t r, uint8_t g, uint8_t b) {
+static uint8_t vox_match_palette_color(uint8_t r, uint8_t g, uint8_t b, Material* palette, uint8_t base, int count) {
     float rf = r / 255.0f;
     float gf = g / 255.0f;
     float bf = b / 255.0f;
 
-    uint8_t best = PALETTE_MATERIAL_BASE;
+    uint8_t best = base;
     float bestDist = FLT_MAX;
-    for (int i = 0; i < PALETTE_MATERIAL_COUNT; i++) {
-        Material* m = &material_list[PALETTE_MATERIAL_BASE + i];
+    for (int i = 0; i < count; i++) {
+        Material* m = &palette[base + i];
         float dr = m->color[0] - rf;
         float dg = m->color[1] - gf;
         float db = m->color[2] - bf;
         float dist = dr * dr + dg * dg + db * db;
         if (dist < bestDist) {
             bestDist = dist;
-            best = (uint8_t)(PALETTE_MATERIAL_BASE + i);
+            best = (uint8_t)(base + i);
         }
     }
     return best;
@@ -197,7 +197,7 @@ static void vox_walk_node(
 }
 
 
-static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool matchPalette) {
+static Structure_t structure_load_vox(const char* path, uint8_t type, bool matchPalette, bool entityPalette) {
     Structure_t structure = {0};
 
     FILE* fp = fopen(path, "rb");
@@ -357,6 +357,10 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     structure.voxels = calloc(size, sizeof(uint8_t));
     memcpy(structure.dimensions, dim, sizeof(structure.dimensions));
 
+    Material* palette = entityPalette ? entity_material_list : material_list;
+    uint8_t paletteBase = entityPalette ? ENTITY_COLOR_BASE : PALETTE_MATERIAL_BASE;
+    int paletteCount = entityPalette ? ENTITY_PALETTE_COLOR_COUNT : PALETTE_MATERIAL_COUNT;
+
     for (int32_t p = 0; p < num_placements; p++) {
         VoxPlacement* placement = &placements[p];
         if (placement->model_id < 0 || placement->model_id >= num_models) { continue; }
@@ -378,10 +382,10 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
 
             uint32_t idx = wx + wy * dim[0] + wz * dim[0] * dim[1];
 
-            uint8_t material = (uint8_t)type;
+            uint8_t material = type;
             if (matchPalette && has_palette && colorIndex >= 1) {
                 uint8_t* rgba = vox_palette[colorIndex - 1];
-                material = vox_match_palette_color(rgba[0], rgba[1], rgba[2]);
+                material = vox_match_palette_color(rgba[0], rgba[1], rgba[2], palette, paletteBase, paletteCount);
             }
             structure.voxels[idx] = material;
         }

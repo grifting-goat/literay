@@ -17,6 +17,7 @@
 #include "material.h" //material_list
 
 #include "world.h"
+#include "vox_loader.h"
 
 
 int main() {
@@ -28,6 +29,7 @@ int main() {
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
 	material_palette_create();
+	entity_material_palette_create();
 
 	uint32_t wrld_dim[3] = { VOXEL_GRID_DIM, VOXEL_GRID_DIM, VOXEL_GRID_DIM };
 	World wrld = world_create(wrld_dim);
@@ -41,6 +43,12 @@ int main() {
     window_attach_device(&window);
     window_world_buffer_load(&window, &wrld);
 	window_material_buffer_load(&window, material_list);
+	window_entity_material_buffer_load(&window, entity_material_list);
+
+
+	Structure_t girl = structure_load_vox("./res/models/queen.vox", ENTITY_SKIN, true, true);
+	float entityScale = 3.0f / girl.dimensions[1];
+	window_entity_buffer_load(&window, &girl);
 
     glfwSetInputMode(window.glfw_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	double lastMouseX = 0.0, lastMouseY = 0.0;
@@ -96,8 +104,9 @@ int main() {
 		cam.angle.z = roll;
 
         camera_position_controller(&window, &cam, frameTime);
-
-        window_render(&window, &cam, sun_direction);
+		
+		Vector_t offset = vector_create(0.0f, -(float)girl.dimensions[1] * 0.9f * entityScale, 0.0f);
+        window_render(&window, &cam, sun_direction, vector_add(&cam.pos, &offset), cam.angle.y, entityScale);
 
     }
 

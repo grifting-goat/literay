@@ -135,7 +135,7 @@ Material material_list[0xFF] = {
         .color = {0.90f, 0.90f, 0.90f, 1.0f},
         .emissionColor = {0.90f, 0.90f, 0.90f, 1.0f},
         .emissionStrength = 0.0f,
-        .smoothness = 0.98f,
+        .smoothness = 0.9f,
         .specularProbability = 0.07f,
         .noise = 0.05f
     },
@@ -143,8 +143,8 @@ Material material_list[0xFF] = {
         .color = {0.722f, 0.451f, 0.2f, 1.0f},
         .emissionColor = {0.722f, 0.451f, 0.2f, 1.0f},
         .emissionStrength = 0.0f,
-        .smoothness = 0.7f,
-        .specularProbability = 0.9f,
+        .smoothness = 0.8f,
+        .specularProbability = 0.7f,
         .noise = 0.02f
     },
 };
@@ -153,6 +153,9 @@ void material_palette_create() {
 
     static const float VALUES[4] = {0.3f, 0.55f, 0.8f, 1.0f};
     static const float SATURATIONS[2] = {0.55f, 0.95f};
+
+    int whitestIdx = 0;
+    float whitestDist = 1e9f;
 
     for (int i = 0; i < PALETTE_MATERIAL_COUNT; i++) {
         int hueIdx = i % 16;
@@ -175,5 +178,81 @@ void material_palette_create() {
         m.noise = 0.01f;
 
         material_list[PALETTE_MATERIAL_BASE + i] = m;
+
+        float dr = rf - 1.0f, dg = gf - 1.0f, db = bf - 1.0f;
+        float dist = dr * dr + dg * dg + db * db;
+        if (dist < whitestDist) {
+            whitestDist = dist;
+            whitestIdx = i;
+        }
     }
+
+    material_list[PALETTE_MATERIAL_BASE + whitestIdx].emissionStrength = 6.0f;
+}
+
+Material entity_material_list[0xFF] = {0};
+
+void entity_material_palette_create() {
+
+    static const float VALUES[5] = {0.25f, 0.4375f, 0.625f, 0.8125f, 1.0f};
+    static const float SATURATIONS[2] = {0.55f, 0.95f};
+
+    for (int i = 0; i < ENTITY_PALETTE_COLOR_COUNT; i++) {
+        int hueIdx = i % 25;
+        int valIdx = (i / 25) % 5;
+        int satIdx = i / 125;
+
+        float hue = hueIdx * (360.0f / 25.0f);
+        float val = VALUES[valIdx];
+        float sat = SATURATIONS[satIdx];
+
+        float rf, gf, bf;
+        hsv_to_rgb(hue, sat, val, &rf, &gf, &bf);
+
+        Material m = {0};
+        m.color[0] = rf; m.color[1] = gf; m.color[2] = bf; m.color[3] = 1.0f;
+        m.emissionColor[0] = rf; m.emissionColor[1] = gf; m.emissionColor[2] = bf; m.emissionColor[3] = 1.0f;
+        m.emissionStrength = 0.0f;
+        m.smoothness = 0.0f;
+        m.specularProbability = 0.0f;
+        m.noise = 0.01f;
+
+        entity_material_list[ENTITY_COLOR_BASE + i] = m;
+    }
+
+    entity_material_list[ENTITY_WHITE_LIGHT] = (Material){
+        .color = {1.0f, 1.0f, 1.0f, 1.0f},
+        .emissionColor = {1.0f, 1.0f, 1.0f, 1.0f},
+        .emissionStrength = 10.0f,
+        .smoothness = 0.0f,
+        .specularProbability = 0.0f,
+        .noise = 0.0f
+    };
+
+    entity_material_list[ENTITY_SKIN] = (Material){
+        .color = {0.94f, 0.76f, 0.62f, 1.0f},
+        .emissionColor = {0.94f, 0.76f, 0.62f, 1.0f},
+        .emissionStrength = 0.0f,
+        .smoothness = 0.9f,
+        .specularProbability = 0.9f,
+        .noise = 0.0f
+    };
+
+    entity_material_list[ENTITY_BLACK] = (Material){
+        .color = {0.0f, 0.0f, 0.0f, 1.0f},
+        .emissionColor = {0.0f, 0.0f, 0.0f, 1.0f},
+        .emissionStrength = 0.0f,
+        .smoothness = 0.0f,
+        .specularProbability = 0.0f,
+        .noise = 0.0f
+    };
+
+    entity_material_list[ENTITY_MIRROR] = (Material){
+        .color = {1.0f, 1.0f, 1.0f, 1.0f},
+        .emissionColor = {1.0f, 1.0f, 1.0f, 1.0f},
+        .emissionStrength = 0.0f,
+        .smoothness = 1.0f,
+        .specularProbability = 1.0f,
+        .noise = 0.0f
+    };
 }
