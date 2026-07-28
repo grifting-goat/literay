@@ -10,6 +10,7 @@
 
 #include "world.h"
 #include "material.h"
+#include "model.h"
 
 //dont tell anyone i genuenly just asked claude to make this 
 
@@ -391,6 +392,19 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
         free(models[i].xyzi);
     }
     return structure;
+}
+
+// same loader, repackaged as a Model_t instead of a Structure_t
+static Model_t vox_load_model(const char* path, uint8_t up_axis, uint8_t cardinal_axis, MaterialTypes material, bool colorMatch) {
+    Structure_t structure = structure_load_vox(path, material, colorMatch);
+
+    Model_t model = {0};
+    model.voxels = structure.voxels;
+    memcpy(model.dimensions, structure.dimensions, sizeof(model.dimensions));
+    model.size = structure.size;
+    model.up_axis = up_axis;
+    model.cardinal_axis = cardinal_axis;
+    return model;
 }
 
 #endif //VOX_LOADER_H

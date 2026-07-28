@@ -3,7 +3,7 @@
 This is my sandbox testing enviroment for voxel-based raytracing
 
 <div align="left">
-  <img src="res/nicer_lantern.png" width="128" alt="Description">
+  <img src="res/images/nicer_lantern.png" width="128" alt="Description">
 </div>
 
 ## Technical Goals
@@ -48,10 +48,12 @@ eventually I want to develop a PVP and exploration based SMP game but im writing
 
 ## Screenshots
 
-![Fog](res/fog.png)
+![Ship](res/images/ship.png)
+
+![Player](res/images/cute.png)
 
 
-![Water](res/water.png)
+![Fog](res/images/fog.png)
 
 
-![Ship](res/ship.png)
+![Water](res/images/water.png)

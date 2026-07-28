@@ -34,12 +34,12 @@ RWTexture2D<float4> accumImage;
 struct PushConstants {
     int2 _screen_size;
     uint frame_idx;
-    uint accumCount; // fills the slot int3 below needs padding for anyway
+    uint accumCount; 
 
     int3 _voxel_grid_size;
-    float _sun_dir_pad; // fills the slot sun_direction below needs padding for anyway, same trick as accumCount above
+    float _pad; 
 
-    float3 sun_direction; // pre-normalized on the CPU side before upload
+    float3 sun_direction; // pre-normalized on the CPU
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -47,6 +47,7 @@ static const float FLT_INF = asfloat(0x7F800000);
 static const float MAX_RAY_DISTANCE = 400.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
+static const uint MAX_BONUS_BOUNCES = 4;
 
 static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
 
@@ -91,7 +92,7 @@ uint HashVoxelCell(int3 cell) {
     return NextRandom(seed);
 }
 
-// Uniform direction on the unit sphere (already normalized)
+// Uniform direction on the unit sphere 
 float3 RandomDirection(inout uint state) {
     float z = 1.0f - 2.0f * RandomValue(state);
     float phi = 6.2831853f * RandomValue(state);
@@ -126,7 +127,7 @@ bool IsBlockSolid(uint blockIndex) {
     return ((word >> bit) & 1u) != 0u;
 }
 
-// occupancy bit only; the material byte is fetched just once, on an actual hit
+// occupancy bit 
 bool IsVoxelSolid(uint index) {
     uint word = voxelsOccIn.Load((index >> 5) << 2);
     uint bit = index & 31u;
@@ -144,14 +145,13 @@ float3 DDAStepMask(float3 tMax) {
     mask.y = (tMax.y <  tMax.x) && (tMax.y <= tMax.z);
     mask.z = 1.0f - mask.x - mask.y;
     return mask;
-}
+} //goofy optimization fable said to do
+
 
 //https://github.com/SebLague/Ray-Tracing
 float3 GetEnvironmentLight(Ray ray) {
 
-    if (!EnvironmentEnabled) {
-        return 0;
-    }
+    if (!EnvironmentEnabled) {return 0;}
 
     if (ray.direction.y <= 0.0f) {
         float voidT = smoothstep(-0.4f, 0.0f, ray.direction.y);
@@ -164,6 +164,107 @@ float3 GetEnvironmentLight(Ray ray) {
 
     return skyGradient + sun;
 }
+/*
+//standard dda voxel
+Hit CastStaticRay(Ray ray) {
+    
+    Hit hit;
+    hit.mat_type = 0;
+    hit.dist = FLT_INF;
+    hit.end = float3(0.0f, 0.0f, 0.0f);
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+
+    int3 cell = int3(floor(ray.origin));
+    if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
+        return hit;
+    }
+
+    int3 istep = int3(sign(ray.direction));
+    float3 invDir = rcp(ray.direction);
+    float3 tDelta = abs(invDir);
+    float3 stepSign = max(sign(ray.direction), 0.0f);
+
+    float3 tFarPerAxis = max(-ray.origin * invDir, (float3(pc._voxel_grid_size) - ray.origin) * invDir);
+    float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.01f;
+
+    int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
+    int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
+    int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
+
+
+    int3 blockCell = cell / int(BLOCK_SIZE);
+    float3 blockNextBoundary = float3(blockCell) * BLOCK_SIZE + stepSign * BLOCK_SIZE;
+    float3 blockTMax = select(ray.direction != 0.0f, (blockNextBoundary - ray.origin) * invDir, FLT_INF);
+    float3 blockTDelta = tDelta * BLOCK_SIZE;
+    int blockIndex = blockCell.x + blockCell.y * blockGridSize.x + blockCell.z * blockGridSize.x * blockGridSize.y;
+    float blockTCurrent = 0.0f;
+    float3 normal = float3(0.0f, 0.0f, 0.0f);
+
+    while (blockTCurrent < tExit) {
+
+        if (IsBlockSolid(uint(blockIndex))) {
+            float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
+            int3 blockMin = blockCell * int(BLOCK_SIZE);
+            int3 fineCell = clamp(int3(floor(pos)), blockMin, blockMin + int(BLOCK_SIZE) - 1);
+
+            float tCurrent = blockTCurrent;
+            float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
+            int voxelIndex = fineCell.x + fineCell.y * pc._voxel_grid_size.x + fineCell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
+
+            float blockBoundary = min(min(blockTMax.x, blockTMax.y), blockTMax.z) + 0.01f;
+            float blockExit = min(blockBoundary, tExit);
+
+            while (tCurrent < blockExit) {
+                if (IsVoxelSolid(uint(voxelIndex))) {
+                    hit.mat_type = ReadVoxel(fineCell);
+                    hit.dist = tCurrent;
+                    hit.normal = normal;
+                    hit.end = ray.origin + ray.direction * tCurrent;
+                    return hit;
+                }
+
+                float3 mask = DDAStepMask(tMax);
+                tCurrent = dot(mask, tMax);
+                tMax += mask * tDelta;
+                normal = -mask * float3(istep);
+                voxelIndex += int(dot(mask, float3(idxStep)));
+                fineCell += int3(mask) * istep;
+            }
+        }
+
+        float3 blockMask = DDAStepMask(blockTMax);
+        blockTCurrent = dot(blockMask, blockTMax);
+        blockTMax += blockMask * blockTDelta;
+        normal = -blockMask * float3(istep);
+
+        blockCell += int3(blockMask) * istep;
+        if (any(blockCell < 0) || any(blockCell >= blockGridSize)) {
+            break;
+        }
+        blockIndex += int(dot(blockMask, float3(blockIdxStep)));
+    }
+    return hit;
+    
+}
+
+//intersect with non-grid aligned voxels, bounding boxes with own coord system
+
+Hit CastDynamicRay(Ray ray) {
+
+    
+
+}
+
+Hit NewCastRay(Ray ray) {
+    Hit staticHit = CastStaticRay(ray);
+    Hit dynamicHit = CastDynamicRay(ray);
+
+    if (staticHit.dist > dynamicHit.dist) {
+        return dynamicHit;
+    }
+    return staticHit;
+
+}*/
 
 Hit CastRay(Ray ray) {
 
@@ -190,7 +291,7 @@ Hit CastRay(Ray ray) {
     int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
     int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
 
-    // coarse state only; fine state is rebuilt on entry into a solid block
+
     int3 blockCell = cell / int(BLOCK_SIZE);
     float3 blockNextBoundary = float3(blockCell) * BLOCK_SIZE + stepSign * BLOCK_SIZE;
     float3 blockTMax = select(ray.direction != 0.0f, (blockNextBoundary - ray.origin) * invDir, FLT_INF);
@@ -202,7 +303,6 @@ Hit CastRay(Ray ray) {
     while (blockTCurrent < tExit) {
 
         if (IsBlockSolid(uint(blockIndex))) {
-            // entry point nudged forward, then clamped into the block (guards the epsilon drift)
             float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
             int3 blockMin = blockCell * int(BLOCK_SIZE);
             int3 fineCell = clamp(int3(floor(pos)), blockMin, blockMin + int(BLOCK_SIZE) - 1);
@@ -259,7 +359,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     }
 
     uint pixelIndex = uint(pixel.y) * uint(pc._screen_size.x) + uint(pixel.x);
-    uint rngState = pixelIndex + pc.frame_idx * 719393;
+    uint rngState = pixelIndex + pc.frame_idx * 719393; //borrowed might want to update
 
     float3 totalLight = 0.0f;
     uint bonus = 0;
@@ -277,7 +377,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 Material mat = materials[hit.mat_type];
 
                 //shadow ray
-                if (bounces == 0) {
+                if (!bounces || bonus == 1) { //keep shdows in mirrors
                     Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), pc.sun_direction);
                     Hit shadowHit = CastRay(shadow);
 
@@ -298,14 +398,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 r.origin = hit.end + hit.normal * 0.01f;
 
                 bool isSpecular = mat.specularProbability >= RandomValue(rngState);
-                bonus = min(bonus + (uint)isSpecular, 3u);
+                bonus = min(bonus + (uint)isSpecular, MAX_BONUS_BOUNCES);
 
                 float3 diffuseDir = normalize(hit.normal + RandomDirection(rngState));
                 float3 specularDir = Reflect(r.direction, hit.normal);
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
 
-                r.incomingLight += AmbientLight * r.color * (!isSpecular * 0.2); //so specular doesnt add to much ambient light
+                r.incomingLight += AmbientLight * r.color * (!isSpecular); //so specular doesnt add any ambiant light
             }
             else {
                 r.incomingLight += GetEnvironmentLight(r) * r.color;

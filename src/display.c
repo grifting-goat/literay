@@ -1388,7 +1388,7 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 
 	uploadWorldTextureData(window, voxels);
 
-	// fine occupancy bits: 1 bit per voxel, linear voxel index order
+	// fine occupancy bits: 
 	VkDeviceSize occ_size = world_grid_size / 8;
 	uint8_t* occ = calloc(occ_size, 1);
 	for (VkDeviceSize i = 0; i < world_grid_size; i++) {
@@ -1398,13 +1398,13 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 	}
 	uploadBufferData(window, window->vk_objects.worldGridOccBuffer.buffer, occ, occ_size);
 
-	// coarse block mask, derived from the occupancy bits (any set bit in a block => solid)
-	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
-	VkDeviceSize mask_size = ((VkDeviceSize)blocksPerAxis * blocksPerAxis * blocksPerAxis + 7) / 8;
+	// coarse block mask
+	uint32_t blocks_per_axis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
+	VkDeviceSize mask_size = ((VkDeviceSize)blocks_per_axis * blocks_per_axis * blocks_per_axis + 7) >> 3;
 	uint8_t* mask = calloc(mask_size, 1);
-	for (uint32_t bz = 0; bz < blocksPerAxis; bz++) {
-		for (uint32_t by = 0; by < blocksPerAxis; by++) {
-			for (uint32_t bx = 0; bx < blocksPerAxis; bx++) {
+	for (uint32_t bz = 0; bz < blocks_per_axis; bz++) {
+		for (uint32_t by = 0; by < blocks_per_axis; by++) {
+			for (uint32_t bx = 0; bx < blocks_per_axis; bx++) {
 				bool solid = false;
 				for (uint32_t vz = 0; vz < VOXEL_MASK_BLOCK_SIZE && !solid; vz++) {
 					for (uint32_t vy = 0; vy < VOXEL_MASK_BLOCK_SIZE && !solid; vy++) {
@@ -1418,7 +1418,7 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 					}
 				}
 				if (solid) {
-					uint32_t blockIndex = bx + by * blocksPerAxis + bz * blocksPerAxis * blocksPerAxis;
+					uint32_t blockIndex = bx + by * blocks_per_axis + bz * blocks_per_axis * blocks_per_axis;
 					mask[blockIndex >> 3] |= (uint8_t)(1u << (blockIndex & 7u));
 				}
 			}
