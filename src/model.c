@@ -195,3 +195,6 @@ void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis) 
     model->up_axis = up_axis;
     model->cardinal_axis = cardinal_axis;
 }
+
+
+Model_t model_instance_list[16] = {0};

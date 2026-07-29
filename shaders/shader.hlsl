@@ -23,6 +23,26 @@ cbuffer CameraData {
     float tan_fov_h;
 };
 
+struct Entity {
+    float4 position; // xyz used, w padding
+    float4 rotation; // xyz used, w padding
+    float scale;
+    uint modelIdx;
+};
+[[vk::binding(8, 0)]]
+cbuffer EntityDataBuffer {
+    Entity entity;
+};
+
+struct Model {
+    uint2 _voxelsPtr;
+    uint axes; // byte0 = up_axis, byte1 = cardinal_axis
+    uint3 dimensions;
+    uint size;
+    uint _pad;
+};
+[[vk::binding(9, 0)]] StructuredBuffer<Model> models;
+
 [[vk::binding(4, 0)]]
 [[vk::image_format("rgba8")]]
 RWTexture2D<float4> outputImage;
@@ -62,6 +82,7 @@ static const float3 AmbientLight = float3(0.05f, 0.05f, 0.05f);
 struct Ray {
     float3 origin;
     float3 direction;
+    float3 invDir;
 
     float3 color;
     float3 incomingLight;
@@ -106,6 +127,7 @@ Ray CreateRay(float3 origin, float3 direction) {
     Ray ray;
     ray.origin = origin;
     ray.direction = normalize(direction);
+    ray.invDir = rcp(ray.direction);
     ray.color = float3(1.0f, 1.0f, 1.0f);
     ray.incomingLight = 0.0f;
     return ray;
@@ -164,6 +186,48 @@ float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time o
 
     return skyGradient + sun;
 }
+
+
+
+/*
+uint ReadEntityVoxel(uint index) {
+    uint word = entityVoxelsIn.Load(index & ~3u);
+    return (word >> ((index & 3u) * 8u)) & 0xFFu;
+}
+
+*/
+/*
+void TestAABB(Ray r, Entity ent) {
+
+    float tmin, tmax, tymin, tymax, tzmin, tzmax;
+    
+    tmin = (bounds[r.sign[0]].x - r.origin.x) * r.invdir.x;
+    tmax = (bounds[1-r.sign[0]].x - r.origin.x) * r.invdir.x;
+    tymin = (bounds[r.sign[1]].y - r.origin.y) * r.invdir.y;
+    tymax = (bounds[1-r.sign[1]].y - r.origin.y) * r.invdir.y;
+    
+    if ((tmin > tymax) || (tymin > tmax))
+        return false;
+
+    if (tymin > tmin)
+        tmin = tymin;
+    if (tymax < tmax)
+        tmax = tymax;
+    
+    tzmin = (bounds[r.sign[2]].z - r.origin.z) * r.invdir.z;
+    tzmax = (bounds[1-r.sign[2]].z - r.origin.z) * r.invdir.z;
+    
+    if ((tmin > tzmax) || (tzmin > tmax))
+        return false;
+
+    if (tzmin > tmin)
+        tmin = tzmin;
+    if (tzmax < tmax)
+        tmax = tzmax;
+
+    return true;
+}*/
+
 /*
 //standard dda voxel
 Hit CastStaticRay(Ray ray) {
@@ -180,7 +244,6 @@ Hit CastStaticRay(Ray ray) {
     }
 
     int3 istep = int3(sign(ray.direction));
-    float3 invDir = rcp(ray.direction);
     float3 tDelta = abs(invDir);
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
@@ -257,7 +320,68 @@ Hit CastDynamicRay(Ray ray) {
     hit.end = float3(0.0f, 0.0f, 0.0f);
     hit.normal = float3(0.0f, 0.0f, 0.0f);
 
-    
+
+    for (uint i = 0; i < 1; i++) { //loops over the one entity dta for now
+         if (!TestAABB(ray, entityBuffer[i])) {
+            return hit;
+         }
+
+        //might want to move this to the TestAABB if its faster
+        float s, c;
+        sincos(-entityBuffer[i].rotation[yaw], s, c); //sudo code
+
+        float3 rel = ray.origin - pc.entity_pos;
+        float3 rotatedRel = float3(c * rel.x - s * rel.z, rel.y, s * rel.x + c * rel.z);
+        float3 rotatedDir = float3(c * ray.direction.x - s * ray.direction.z, ray.direction.y, s * ray.direction.x + c * ray.direction.z);
+        float3 lo = rotatedRel / pc.entity_scale + float3(dim.x * 0.5f, 0.0f, dim.z * 0.5f);
+        float3 ld = rotatedDir / pc.entity_scale;
+
+        float3 invD = rcp(ld);
+        float3 t0 = (0.0f - lo) * invD;
+        float3 t1 = (float3(dim) - lo) * invD;
+        float3 tmin3 = min(t0, t1);
+        float3 tmax3 = max(t0, t1);
+        float tEnter = max(max(tmin3.x, tmin3.y), max(tmin3.z, 0.0f));
+        float tExit = min(min(tmax3.x, tmax3.y), tmax3.z) - 0.001f;
+        if (tExit <= tEnter) {
+            return hit;
+        }
+
+        int3 istep = int3(sign(ld));
+        float3 tDelta = abs(invD);
+        float3 stepSign = max(sign(ld), 0.0f);
+
+        float3 p = lo + ld * (tEnter + 0.001f);
+        int3 cell = clamp(int3(floor(p)), int3(0, 0, 0), dim - 1);
+        float3 tMax = select(ld != 0.0f, (float3(cell) + stepSign - lo) * invD, FLT_INF);
+        float tCurrent = tEnter;
+        float3 entryMask = select(tmin3 == tEnter, 1.0f, 0.0f);
+        float3 lnormal = -entryMask * float3(istep);
+
+        while (tCurrent < tExit) {
+            uint idx = uint(cell.x + cell.y * dim.x + cell.z * dim.x * dim.y);
+            uint mat = ReadEntityVoxel(idx);
+            if (mat != 0) {
+                hit.mat_type = mat;
+                hit.dist = tCurrent;
+                hit.end = ray.origin + ray.direction * tCurrent;
+                hit.normal = float3(c * lnormal.x + s * lnormal.z, lnormal.y, -s * lnormal.x + c * lnormal.z);
+                hit.isEntity = true;
+                return hit;
+            }
+
+            float3 mask = DDAStepMask(tMax);
+            tCurrent = dot(mask, tMax);
+            tMax += mask * tDelta;
+            lnormal = -mask * float3(istep);
+            cell += int3(mask) * istep;
+            if (any(cell < 0) || any(cell >= dim)) {
+                break;
+            }
+        }
+        return hit;
+    }
+
 
 }
 
@@ -286,7 +410,7 @@ Hit CastRay(Ray ray) {
     }
 
     int3 istep = int3(sign(ray.direction));
-    float3 invDir = rcp(ray.direction);
+    float3 invDir = ray.invDir;
     float3 tDelta = abs(invDir);
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
@@ -410,6 +534,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 float3 specularDir = Reflect(r.direction, hit.normal);
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
+                r.invDir = rcp(r.direction);
 
                 r.incomingLight += AmbientLight * r.color * (!isSpecular); //so specular doesnt add any ambiant light
             }

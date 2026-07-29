@@ -1,5 +1,5 @@
 #ifndef DISPLAY_H
-#define DISPAY_H
+#define DISPLAY_H
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -9,6 +9,7 @@
 
 #include "camera.h"
 #include "world.h"
+#include "model.h"
 
 
 // Configuration constants
@@ -19,7 +20,8 @@
 #define OUTPUT_IMAGE_FORMAT   VK_FORMAT_R8G8B8A8_UNORM
 #define ACCUM_IMAGE_FORMAT    VK_FORMAT_R32G32B32A32_SFLOAT // needs full float precision; accumulated over many frames
 #define WORLD_TEXTURE_FORMAT  VK_FORMAT_R8_UINT // 3D voxel material ids
-#define MAX_MATERIALS          256U // one per possible voxel byte value
+#define MAX_MATERIALS         256U // one per possible voxel byte value
+#define MAX_MODELS            16U 
 
 
 #define VOXEL_GRID_DIM 512U
@@ -97,8 +99,14 @@ typedef struct {
     Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
     Vk_Buffer_t worldGridMaskBuffer;
     Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
+
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
+
+
+    Vk_Buffer_t entityDataBuffer[MAX_FRAMES_IN_FLIGHT];
+    Vk_Buffer_t modelBuffer;
+    
 
 } Vk_Objects_t;
 
@@ -123,6 +131,8 @@ void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 void window_world_buffer_load(Window_t* window, World* wrld);
 
 void window_material_buffer_load(Window_t* window, Material* mat_list);
+
+void window_model_buffer_load(Window_t* window, Model_t* model_list);
 
 void window_close(Window_t* window);
 

@@ -35,7 +35,7 @@ void camera_update_fov(Camera* cam, float fov, float aspect);
 // true if pos/angle differ from the last call, false otherwise; always updates prev state as a side effect
 bool camera_check_moved(Camera* cam);
 
-struct Window_t; // avoids pulling in display.h, which already includes this header
+struct Window_t; 
 void camera_position_controller(struct Window_t* window, Camera* cam, float frameTime);
 
 #endif //CAMERA_H

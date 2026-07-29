@@ -15,6 +15,7 @@
 #include "camera.h"
 #include "display.h"
 #include "material.h" //material_list
+#include "model.h"
 
 #include "world.h"
 
@@ -26,6 +27,8 @@ int main() {
 
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
+
+	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
 
 	material_palette_create();
 
@@ -41,6 +44,7 @@ int main() {
     window_attach_device(&window);
     window_world_buffer_load(&window, &wrld);
 	window_material_buffer_load(&window, material_list);
+	window_model_buffer_load(&window, model_instance_list);
 
     glfwSetInputMode(window.glfw_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	double lastMouseX = 0.0, lastMouseY = 0.0;

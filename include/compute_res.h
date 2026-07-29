@@ -1,6 +1,8 @@
 #ifndef COMPUTE_RES_H
 #define COMPUTE_RES_H
 
+#include "stdint.h"
+
 typedef struct {
     float color[4];
     float emissionColor[4];
@@ -19,6 +21,14 @@ typedef struct {
     float tan_fov_v;
 	float tan_fov_h;
 } CameraData;
+
+typedef struct {
+    float position[4]; 
+    float rotation[4]; 
+    float scale;
+
+    uint32_t modelIdx;
+} EntityData;
 
 typedef struct {
     int _screen_size[2];

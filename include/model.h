@@ -25,6 +25,8 @@ typedef enum {
     CUBE
 } ModelPrefabs;
 
+extern Model_t model_instance_list[16];
+
 Model_t model_create_prefab(ModelPrefabs prefab_type, uint8_t up_axis, uint8_t cardinal_axis, void* param1, void* param2, void* param3);
 
 Model_t model_create_from_vox(const char* path, uint8_t up_axis, uint8_t cardinal_axis, MaterialTypes material, bool colorMatch); //color mathc ignores material (can be NULL)
