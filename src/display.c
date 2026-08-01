@@ -3,11 +3,14 @@
 
 #include "stb_image.h"
 #include <string.h>
+#include "stb_ds.h"
 
 
 #define ICON_32_PATH "./res/icon/icon_32.png"
 #define ICON_64_PATH "./res/icon/icon_64.png"
 #define ICON_128_PATH "./res/icon/icon_128.png"
+
+
 
 
 void appInfoCreate(Window_t* window);
@@ -35,8 +38,7 @@ void createComputeShader(Window_t* window);
 Vk_Buffer_t createHostVisibleBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
 Vk_Buffer_t createDeviceLocalBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
 void uploadBufferData(Window_t* window, VkBuffer dst, const void* data, VkDeviceSize size);
-void createWorldTexture(Window_t* window);
-void uploadWorldTextureData(Window_t* window, const void* data);
+void createBrickTextures(Window_t* window);
 
 void createComputeBuffers(Window_t* window);
 
@@ -163,7 +165,7 @@ void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 
 void window_test_entity_upload(Window_t* window) {
 	EntityData entities[MAX_ENTITIES] = {0};
-	float center = VOXEL_GRID_DIM / 2 ;
+	float center = MAX_LOADED_VOXEL_DIM / 2 ;
 	for (int i = 1; i < MAX_ENTITIES; i++) {
 		EntityData* entity = &entities[i];
 		entity->position[0] =  (float)(rand() % 100 - 50) + center;
@@ -290,9 +292,9 @@ void window_render(Window_t* window, Camera* cam, Vector_t sun_direction) {
 	PushConstants push_constants = {0};
 	push_constants._screen_size[0] = (int)window->vk_objects.swapchain_data.swapchainWidth;
 	push_constants._screen_size[1] = (int)window->vk_objects.swapchain_data.swapchainHeight;
-	push_constants._voxel_grid_size[0] = (int)VOXEL_GRID_DIM;
-	push_constants._voxel_grid_size[1] = (int)VOXEL_GRID_DIM;
-	push_constants._voxel_grid_size[2] = (int)VOXEL_GRID_DIM;
+	push_constants._voxel_grid_size[0] = (int)MAX_LOADED_VOXEL_DIM;
+	push_constants._voxel_grid_size[1] = (int)MAX_LOADED_VOXEL_DIM;
+	push_constants._voxel_grid_size[2] = (int)MAX_LOADED_VOXEL_DIM;
 	push_constants.frame_idx = (unsigned int)frame_id;
 	push_constants.accumCount = window->vk_objects.accumCount;
 
@@ -527,9 +529,9 @@ void window_close(Window_t* window) {
 		vkDestroyPipelineLayout(vk->device, vk->computePipeline.layout, NULL);
 	}
 
-	destroyVkImage(vk->device, &vk->worldVoxelTexture);
-	destroyVkBuffer(vk->device, &vk->worldGridMaskBuffer);
-	destroyVkBuffer(vk->device, &vk->worldGridOccBuffer);
+	destroyVkImage(vk->device, &vk->brickAtlasTexture);
+	destroyVkImage(vk->device, &vk->brickIndirectionTexture);
+	destroyVkImage(vk->device, &vk->voxelOccupancyTexture);
 	destroyVkBuffer(vk->device, &vk->materialProperitesBuffer);
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
 		destroyVkBuffer(vk->device, &vk->cameraDataBuffer[i]);
@@ -1086,7 +1088,7 @@ void createComputePipeline(Window_t* window) {
 
 	VkDescriptorSetLayoutBinding bindings[10] = {0};
 	bindings[0].binding = 1;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // 3D world voxel texture
+	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // brick atlas texture (voxel data)
 	bindings[0].descriptorCount = 1;
 	bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -1111,12 +1113,12 @@ void createComputePipeline(Window_t* window) {
 	bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 	bindings[5].binding = 6;
-	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // brick indirection texture (brick coord -> atlas slot)
 	bindings[5].descriptorCount = 1;
 	bindings[5].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 	bindings[6].binding = 7;
-	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // voxel occupancy texture, per chunk
 	bindings[6].descriptorCount = 1;
 	bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -1324,14 +1326,15 @@ void uploadBufferData(Window_t* window, VkBuffer dst, const void* data, VkDevice
 	destroyVkBuffer(window->vk_objects.device, &staging);
 }
 
-void createWorldTexture(Window_t* window) {
+// shared creation path for the brick atlas / indirection / occupancy textures -- same layout, different extents+formats
+static void createVoxelTexture3D(Window_t* window, Vk_Image_t* target, uint32_t width, uint32_t height, uint32_t depth, VkFormat format, const char* debug_name) {
 	VkImageCreateInfo image_create_info = {0};
 	image_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
 	image_create_info.imageType = VK_IMAGE_TYPE_3D;
-	image_create_info.format = WORLD_TEXTURE_FORMAT;
-	image_create_info.extent.width = VOXEL_GRID_DIM;
-	image_create_info.extent.height = VOXEL_GRID_DIM;
-	image_create_info.extent.depth = VOXEL_GRID_DIM;
+	image_create_info.format = format;
+	image_create_info.extent.width = width;
+	image_create_info.extent.height = height;
+	image_create_info.extent.depth = depth;
 	image_create_info.mipLevels = 1;
 	image_create_info.arrayLayers = 1;
 	image_create_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1340,133 +1343,65 @@ void createWorldTexture(Window_t* window) {
 	image_create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	image_create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-	if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &window->vk_objects.worldVoxelTexture.outputImage) != VK_SUCCESS) {
-		printf("failed to create world voxel texture.\n");
+	if (vkCreateImage(window->vk_objects.device, &image_create_info, NULL, &target->outputImage) != VK_SUCCESS) {
+		printf("failed to create %s.\n", debug_name);
 		return;
 	}
 
 	VkMemoryRequirements mem_reqs;
-	vkGetImageMemoryRequirements(window->vk_objects.device, window->vk_objects.worldVoxelTexture.outputImage, &mem_reqs);
+	vkGetImageMemoryRequirements(window->vk_objects.device, target->outputImage, &mem_reqs);
 
 	VkMemoryAllocateInfo alloc_info = {0};
 	alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
 	alloc_info.allocationSize = mem_reqs.size;
 	alloc_info.memoryTypeIndex = findMemoryTypeIndex(window, mem_reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
 
-	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &window->vk_objects.worldVoxelTexture.outputImageMemory) != VK_SUCCESS) {
-		printf("failed to allocate world voxel texture memory.\n");
+	if (vkAllocateMemory(window->vk_objects.device, &alloc_info, NULL, &target->outputImageMemory) != VK_SUCCESS) {
+		printf("failed to allocate %s memory.\n", debug_name);
 		return;
 	}
-	vkBindImageMemory(window->vk_objects.device, window->vk_objects.worldVoxelTexture.outputImage, window->vk_objects.worldVoxelTexture.outputImageMemory, 0);
+	vkBindImageMemory(window->vk_objects.device, target->outputImage, target->outputImageMemory, 0);
 
 	VkImageViewCreateInfo view_create_info = {0};
 	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	view_create_info.image = window->vk_objects.worldVoxelTexture.outputImage;
+	view_create_info.image = target->outputImage;
 	view_create_info.viewType = VK_IMAGE_VIEW_TYPE_3D;
-	view_create_info.format = WORLD_TEXTURE_FORMAT;
+	view_create_info.format = format;
 	view_create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	view_create_info.subresourceRange.baseMipLevel = 0;
 	view_create_info.subresourceRange.levelCount = 1;
 	view_create_info.subresourceRange.baseArrayLayer = 0;
 	view_create_info.subresourceRange.layerCount = 1;
 
-	if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &window->vk_objects.worldVoxelTexture.outputImageView) != VK_SUCCESS) {
-		printf("failed to create world voxel texture view.\n");
+	if (vkCreateImageView(window->vk_objects.device, &view_create_info, NULL, &target->outputImageView) != VK_SUCCESS) {
+		printf("failed to create %s view.\n", debug_name);
 		return;
 	}
 
-	printf("world voxel texture created.\n");
+	printf("%s created.\n", debug_name);
 }
 
+void createBrickTextures(Window_t* window) {
 
-void uploadWorldTextureData(Window_t* window, const void* data) {
-	VkDeviceSize size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
-	Vk_Buffer_t staging = createHostVisibleBuffer(window, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-	memcpy(staging.mapped, data, size);
+	//voxel data, atlas-packed VOXEL_MASK_BLOCK_SIZE^3 bricks
+	createVoxelTexture3D(window, &window->vk_objects.brickAtlasTexture,
+		MAX_LOADED_VOXEL_DIM, MAX_LOADED_VOXEL_DIM, MAX_LOADED_VOXEL_DIM,
+		WORLD_TEXTURE_FORMAT, "brick atlas texture");
 
-	VkCommandBufferAllocateInfo cmd_alloc_info = {0};
-	cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-	cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
-	cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	cmd_alloc_info.commandBufferCount = 1;
+	// brick coord, one texel per brick
+	uint32_t bricksPerAxis = MAX_LOADED_VOXEL_DIM / VOXEL_BRICK_SIZE;
+	createVoxelTexture3D(window, &window->vk_objects.brickIndirectionTexture,
+		bricksPerAxis, bricksPerAxis, bricksPerAxis,
+		VK_FORMAT_R32_UINT, "brick indirection texture");
 
-	VkCommandBuffer cmd;
-	vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
-
-	VkCommandBufferBeginInfo begin_info = {0};
-	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-	vkBeginCommandBuffer(cmd, &begin_info);
-
-	VkImageMemoryBarrier2 to_transfer = {0};
-	to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-	to_transfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
-	to_transfer.srcAccessMask = 0;
-	to_transfer.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-	to_transfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-	to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-	to_transfer.image = window->vk_objects.worldVoxelTexture.outputImage;
-	to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	to_transfer.subresourceRange.levelCount = 1;
-	to_transfer.subresourceRange.layerCount = 1;
-
-	VkDependencyInfo to_transfer_dep = {0};
-	to_transfer_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-	to_transfer_dep.imageMemoryBarrierCount = 1;
-	to_transfer_dep.pImageMemoryBarriers = &to_transfer;
-	vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
-
-	VkBufferImageCopy region = {0};
-	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	region.imageSubresource.mipLevel = 0;
-	region.imageSubresource.baseArrayLayer = 0;
-	region.imageSubresource.layerCount = 1;
-	region.imageExtent.width = VOXEL_GRID_DIM;
-	region.imageExtent.height = VOXEL_GRID_DIM;
-	region.imageExtent.depth = VOXEL_GRID_DIM;
-
-	vkCmdCopyBufferToImage(cmd, staging.buffer, window->vk_objects.worldVoxelTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-	VkImageMemoryBarrier2 to_shader_read = to_transfer;
-	to_shader_read.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-	to_shader_read.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-	to_shader_read.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-	to_shader_read.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-	to_shader_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-	to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-	VkDependencyInfo to_shader_dep = {0};
-	to_shader_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-	to_shader_dep.imageMemoryBarrierCount = 1;
-	to_shader_dep.pImageMemoryBarriers = &to_shader_read;
-	vkCmdPipelineBarrier2(cmd, &to_shader_dep);
-
-	vkEndCommandBuffer(cmd);
-
-	VkSubmitInfo submit_info = {0};
-	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submit_info.commandBufferCount = 1;
-	submit_info.pCommandBuffers = &cmd;
-	vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
-	vkQueueWaitIdle(window->vk_objects.deviceQueue);
-
-	vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
-	destroyVkBuffer(window->vk_objects.device, &staging);
+	//fine per-voxel occupancy
+	createVoxelTexture3D(window, &window->vk_objects.voxelOccupancyTexture,
+		MAX_LOADED_VOXEL_DIM / 32, MAX_LOADED_VOXEL_DIM, MAX_LOADED_VOXEL_DIM,
+		VK_FORMAT_R32_UINT, "voxel occupancy texture");
 }
 
 void createComputeBuffers(Window_t* window) {
-	createWorldTexture(window);
-
-	uint32_t blocksPerAxis = VOXEL_GRID_DIM / VOXEL_MASK_BLOCK_SIZE;
-	VkDeviceSize world_grid_mask_size = (VkDeviceSize)blocksPerAxis * blocksPerAxis * blocksPerAxis;
-	world_grid_mask_size = (world_grid_mask_size + 7) / 8; // bits -> bytes, rounded up
-	window->vk_objects.worldGridMaskBuffer = createDeviceLocalBuffer(window, world_grid_mask_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-
-	VkDeviceSize world_grid_occ_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM / 8;
-	window->vk_objects.worldGridOccBuffer = createDeviceLocalBuffer(window, world_grid_occ_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+	createBrickTextures(window);
 
 	VkDeviceSize materials_size = (VkDeviceSize)MAX_MATERIALS * sizeof(Material);
 	window->vk_objects.materialProperitesBuffer = createDeviceLocalBuffer(window, materials_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1492,7 +1427,353 @@ void createComputeBuffers(Window_t* window) {
 	printf("compute buffers created.\n");
 }
 
+void window_world_occupancy_mask_upload(Window_t* window, World* wrld) {
+	uint32_t chunkTexelsX = CHUNK_DIM / 32;
 
+	for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
+		Chunk* chunk = &wrld->chunk_map[i].value;
+		if (chunk->voxelMask == NULL) { continue; }
+
+		VkDeviceSize mask_size = (VkDeviceSize)(CHUNK_SIZE >> 5) * sizeof(uint32_t);
+		Vk_Buffer_t staging = createHostVisibleBuffer(window, mask_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+		memcpy(staging.mapped, chunk->voxelMask, mask_size);
+
+		VkCommandBufferAllocateInfo cmd_alloc_info = {0};
+		cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
+		cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cmd_alloc_info.commandBufferCount = 1;
+
+		VkCommandBuffer cmd;
+		vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
+
+		VkCommandBufferBeginInfo begin_info = {0};
+		begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer(cmd, &begin_info);
+
+		VkImageMemoryBarrier2 to_transfer = {0};
+		to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+		to_transfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+		to_transfer.srcAccessMask = 0;
+		to_transfer.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+		to_transfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+		to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; 
+		to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		to_transfer.image = window->vk_objects.voxelOccupancyTexture.outputImage;
+		to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		to_transfer.subresourceRange.levelCount = 1;
+		to_transfer.subresourceRange.layerCount = 1;
+
+		VkDependencyInfo to_transfer_dep = {0};
+		to_transfer_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		to_transfer_dep.imageMemoryBarrierCount = 1;
+		to_transfer_dep.pImageMemoryBarriers = &to_transfer;
+		vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
+
+		uVector_t coord = wrld->chunk_map[i].key;
+
+		VkBufferImageCopy region = {0};
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.mipLevel = 0;
+		region.imageSubresource.baseArrayLayer = 0;
+		region.imageSubresource.layerCount = 1;
+		region.imageOffset.x = (int32_t)(coord.x * chunkTexelsX);
+		region.imageOffset.y = (int32_t)(coord.y * CHUNK_DIM);
+		region.imageOffset.z = (int32_t)(coord.z * CHUNK_DIM);
+		region.imageExtent.width = chunkTexelsX;
+		region.imageExtent.height = CHUNK_DIM;
+		region.imageExtent.depth = CHUNK_DIM;
+
+		vkCmdCopyBufferToImage(cmd, staging.buffer, window->vk_objects.voxelOccupancyTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+		VkImageMemoryBarrier2 to_shader_read = to_transfer;
+		to_shader_read.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+		to_shader_read.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+		to_shader_read.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+		to_shader_read.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+		to_shader_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+		VkDependencyInfo to_shader_dep = {0};
+		to_shader_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		to_shader_dep.imageMemoryBarrierCount = 1;
+		to_shader_dep.pImageMemoryBarriers = &to_shader_read;
+		vkCmdPipelineBarrier2(cmd, &to_shader_dep);
+
+		vkEndCommandBuffer(cmd);
+
+		VkSubmitInfo submit_info = {0};
+		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submit_info.commandBufferCount = 1;
+		submit_info.pCommandBuffers = &cmd;
+		vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
+		vkQueueWaitIdle(window->vk_objects.deviceQueue);
+
+		vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
+		destroyVkBuffer(window->vk_objects.device, &staging);
+	}
+}
+
+
+
+
+void window_world_atlas_upload(Window_t* window, World* wrld) {
+	const uint32_t bricksPerChunkAxis = CHUNK_DIM / VOXEL_BRICK_SIZE; // 4
+	const uint32_t bricksPerChunk = bricksPerChunkAxis * bricksPerChunkAxis * bricksPerChunkAxis; // 64
+	const uint32_t brickVoxels = VOXEL_BRICK_SIZE * VOXEL_BRICK_SIZE * VOXEL_BRICK_SIZE; // 512
+
+	
+	VkCommandBufferAllocateInfo cmd_alloc_info = {0};
+	cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+	cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
+	cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmd_alloc_info.commandBufferCount = 1;
+
+	VkCommandBuffer cmd;
+	vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
+
+	VkCommandBufferBeginInfo begin_info = {0};
+	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+	begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+	vkBeginCommandBuffer(cmd, &begin_info);
+
+	VkImageMemoryBarrier2 to_transfer = {0};
+	to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+	to_transfer.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+	to_transfer.srcAccessMask = 0;
+	to_transfer.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+	to_transfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+	to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	to_transfer.image = window->vk_objects.brickIndirectionTexture.outputImage;
+	to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	to_transfer.subresourceRange.levelCount = 1;
+	to_transfer.subresourceRange.layerCount = 1;
+
+	VkDependencyInfo to_transfer_dep = {0};
+	to_transfer_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	to_transfer_dep.imageMemoryBarrierCount = 1;
+	to_transfer_dep.pImageMemoryBarriers = &to_transfer;
+	vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
+
+	VkClearColorValue clear_value = {0};
+	clear_value.uint32[0] = EMPTY_SLOT;
+	clear_value.uint32[1] = EMPTY_SLOT;
+	clear_value.uint32[2] = EMPTY_SLOT;
+	clear_value.uint32[3] = EMPTY_SLOT;
+
+	VkImageSubresourceRange clear_range = {0};
+	clear_range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	clear_range.levelCount = 1;
+	clear_range.layerCount = 1;
+
+	vkCmdClearColorImage(cmd, window->vk_objects.brickIndirectionTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1, &clear_range);
+
+	VkImageMemoryBarrier2 to_shader_read = to_transfer;
+	to_shader_read.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+	to_shader_read.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+	to_shader_read.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+	to_shader_read.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+	to_shader_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	to_shader_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDependencyInfo to_shader_dep = {0};
+	to_shader_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+	to_shader_dep.imageMemoryBarrierCount = 1;
+	to_shader_dep.pImageMemoryBarriers = &to_shader_read;
+	vkCmdPipelineBarrier2(cmd, &to_shader_dep);
+
+	vkEndCommandBuffer(cmd);
+
+	VkSubmitInfo submit_info = {0};
+	submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+	submit_info.commandBufferCount = 1;
+	submit_info.pCommandBuffers = &cmd;
+	vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
+	vkQueueWaitIdle(window->vk_objects.deviceQueue);
+
+	vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
+
+	for (int ci = 0; ci < hmlen(wrld->chunk_map); ci++) {
+		Chunk* chunk = &wrld->chunk_map[ci].value;
+		if (chunk->voxels == NULL || chunk->brickMask == 0) { continue; }
+		uVector_t coord = wrld->chunk_map[ci].key;
+
+		uint32_t solidCount = 0;
+		for (uint32_t b = 0; b < bricksPerChunk; b++) {
+			if (chunk->brickMask & (1ull << b)) { solidCount++; }
+		}
+		if (solidCount == 0) { continue; }
+
+		VkDeviceSize voxel_staging_size = (VkDeviceSize)solidCount * brickVoxels;
+		VkDeviceSize slot_staging_size = (VkDeviceSize)solidCount * sizeof(uint32_t);
+
+		Vk_Buffer_t voxel_staging = createHostVisibleBuffer(window, voxel_staging_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+		Vk_Buffer_t slot_staging = createHostVisibleBuffer(window, slot_staging_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
+		VkBufferImageCopy* atlas_regions = malloc(sizeof(VkBufferImageCopy) * solidCount);
+		VkBufferImageCopy* indirection_regions = malloc(sizeof(VkBufferImageCopy) * solidCount);
+
+		uint8_t* voxel_dst = (uint8_t*)voxel_staging.mapped;
+		uint32_t* slot_dst = (uint32_t*)slot_staging.mapped;
+
+		uint32_t writeIdx = 0;
+		for (uint32_t b = 0; b < bricksPerChunk; b++) {
+			if (!(chunk->brickMask & (1ull << b))) { continue; }
+
+			uint32_t bx = b % bricksPerChunkAxis;
+			uint32_t by = (b / bricksPerChunkAxis) % bricksPerChunkAxis;
+			uint32_t bz = b / (bricksPerChunkAxis * bricksPerChunkAxis);
+
+			// pull this brick's voxels out of the chunk's flat array; not contiguous, so copy row by row
+			uint8_t* brickDst = voxel_dst + (VkDeviceSize)writeIdx * brickVoxels;
+			for (uint32_t vz = 0; vz < VOXEL_BRICK_SIZE; vz++) {
+				for (uint32_t vy = 0; vy < VOXEL_BRICK_SIZE; vy++) {
+					uint32_t srcX = bx * VOXEL_BRICK_SIZE;
+					uint32_t srcY = by * VOXEL_BRICK_SIZE + vy;
+					uint32_t srcZ = bz * VOXEL_BRICK_SIZE + vz;
+					uint32_t srcIdx = srcX + srcY * CHUNK_DIM + srcZ * CHUNK_DIM * CHUNK_DIM;
+					uint32_t dstRowIdx = vy * VOXEL_BRICK_SIZE + vz * VOXEL_BRICK_SIZE * VOXEL_BRICK_SIZE;
+					memcpy(brickDst + dstRowIdx, &chunk->voxels[srcIdx], VOXEL_BRICK_SIZE);
+				}
+			}
+
+			// slot == world brick coord: brickAtlasTexture and brickIndirectionTexture are both sized off
+			// MAX_LOADED_VOXEL_DIM, so this is always a unique atlas slot, no allocator needed
+			uint32_t worldBrickX = coord.x * bricksPerChunkAxis + bx;
+			uint32_t worldBrickY = coord.y * bricksPerChunkAxis + by;
+			uint32_t worldBrickZ = coord.z * bricksPerChunkAxis + bz;
+
+			atlas_regions[writeIdx] = (VkBufferImageCopy){0};
+			atlas_regions[writeIdx].bufferOffset = (VkDeviceSize)writeIdx * brickVoxels;
+			atlas_regions[writeIdx].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			atlas_regions[writeIdx].imageSubresource.mipLevel = 0;
+			atlas_regions[writeIdx].imageSubresource.baseArrayLayer = 0;
+			atlas_regions[writeIdx].imageSubresource.layerCount = 1;
+			atlas_regions[writeIdx].imageOffset.x = (int32_t)(worldBrickX * VOXEL_BRICK_SIZE);
+			atlas_regions[writeIdx].imageOffset.y = (int32_t)(worldBrickY * VOXEL_BRICK_SIZE);
+			atlas_regions[writeIdx].imageOffset.z = (int32_t)(worldBrickZ * VOXEL_BRICK_SIZE);
+			atlas_regions[writeIdx].imageExtent.width = VOXEL_BRICK_SIZE;
+			atlas_regions[writeIdx].imageExtent.height = VOXEL_BRICK_SIZE;
+			atlas_regions[writeIdx].imageExtent.depth = VOXEL_BRICK_SIZE;
+
+			slot_dst[writeIdx] = worldBrickX | (worldBrickY << 8) | (worldBrickZ << 16); // packed atlas slot coord, unpacked with shifts+masks in-shader
+
+			indirection_regions[writeIdx] = (VkBufferImageCopy){0};
+			indirection_regions[writeIdx].bufferOffset = (VkDeviceSize)writeIdx * sizeof(uint32_t);
+			indirection_regions[writeIdx].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			indirection_regions[writeIdx].imageSubresource.mipLevel = 0;
+			indirection_regions[writeIdx].imageSubresource.baseArrayLayer = 0;
+			indirection_regions[writeIdx].imageSubresource.layerCount = 1;
+			indirection_regions[writeIdx].imageOffset.x = (int32_t)worldBrickX;
+			indirection_regions[writeIdx].imageOffset.y = (int32_t)worldBrickY;
+			indirection_regions[writeIdx].imageOffset.z = (int32_t)worldBrickZ;
+			indirection_regions[writeIdx].imageExtent.width = 1;
+			indirection_regions[writeIdx].imageExtent.height = 1;
+			indirection_regions[writeIdx].imageExtent.depth = 1;
+
+			writeIdx++;
+		}
+
+		VkCommandBufferAllocateInfo cmd_alloc_info = {0};
+		cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+		cmd_alloc_info.commandPool = window->vk_objects.frameResources[0].commandPool;
+		cmd_alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		cmd_alloc_info.commandBufferCount = 1;
+
+		VkCommandBuffer cmd;
+		vkAllocateCommandBuffers(window->vk_objects.device, &cmd_alloc_info, &cmd);
+
+		VkCommandBufferBeginInfo begin_info = {0};
+		begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+		begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+		vkBeginCommandBuffer(cmd, &begin_info);
+
+		VkImageMemoryBarrier2 to_transfer[2] = {0};
+		for (int b = 0; b < 2; b++) {
+			to_transfer[b].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+			to_transfer[b].srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+			to_transfer[b].srcAccessMask = 0;
+			to_transfer[b].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+			to_transfer[b].dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			to_transfer[b].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; // whole-image transition; fine while only one chunk ever uploads
+			to_transfer[b].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			to_transfer[b].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_transfer[b].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_transfer[b].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			to_transfer[b].subresourceRange.levelCount = 1;
+			to_transfer[b].subresourceRange.layerCount = 1;
+		}
+		to_transfer[0].image = window->vk_objects.brickAtlasTexture.outputImage;
+		to_transfer[1].image = window->vk_objects.brickIndirectionTexture.outputImage;
+		to_transfer[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; // just came out of the clear pass above
+
+		VkDependencyInfo to_transfer_dep = {0};
+		to_transfer_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		to_transfer_dep.imageMemoryBarrierCount = 2;
+		to_transfer_dep.pImageMemoryBarriers = to_transfer;
+		vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
+
+		vkCmdCopyBufferToImage(cmd, voxel_staging.buffer, window->vk_objects.brickAtlasTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, solidCount, atlas_regions);
+		vkCmdCopyBufferToImage(cmd, slot_staging.buffer, window->vk_objects.brickIndirectionTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, solidCount, indirection_regions);
+
+		VkImageMemoryBarrier2 to_shader_read[2];
+		for (int b = 0; b < 2; b++) {
+			to_shader_read[b] = to_transfer[b];
+			to_shader_read[b].srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+			to_shader_read[b].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			to_shader_read[b].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			to_shader_read[b].dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+			to_shader_read[b].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+			to_shader_read[b].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		}
+
+		VkDependencyInfo to_shader_dep = {0};
+		to_shader_dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		to_shader_dep.imageMemoryBarrierCount = 2;
+		to_shader_dep.pImageMemoryBarriers = to_shader_read;
+		vkCmdPipelineBarrier2(cmd, &to_shader_dep);
+
+		vkEndCommandBuffer(cmd);
+
+		VkSubmitInfo submit_info = {0};
+		submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submit_info.commandBufferCount = 1;
+		submit_info.pCommandBuffers = &cmd;
+		vkQueueSubmit(window->vk_objects.deviceQueue, 1, &submit_info, VK_NULL_HANDLE);
+		vkQueueWaitIdle(window->vk_objects.deviceQueue);
+
+		vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
+
+		free(atlas_regions);
+		free(indirection_regions);
+		destroyVkBuffer(window->vk_objects.device, &voxel_staging);
+		destroyVkBuffer(window->vk_objects.device, &slot_staging);
+	}
+}
+
+void window_world_spawn_load(Window_t* window, World* wrld) {
+
+
+	//texture to store bricks on the gpu 
+	//+indirection texture which points to
+
+	window_world_atlas_upload(window, wrld);
+
+	// vox occupancy texture
+
+	window_world_occupancy_mask_upload(window, wrld);
+
+}
+
+
+
+/*
 void window_world_buffer_load(Window_t* window, World* wrld) {
 	VkDeviceSize world_grid_size = (VkDeviceSize)VOXEL_GRID_DIM * VOXEL_GRID_DIM * VOXEL_GRID_DIM;
 	const uint8_t* voxels = wrld->voxels;
@@ -1539,7 +1820,7 @@ void window_world_buffer_load(Window_t* window, World* wrld) {
 
 	free(occ);
 	free(mask);
-}
+}*/
 
 void window_material_buffer_load(Window_t* window, Material* mat_list) {
 
@@ -1604,13 +1885,13 @@ void createComputeDescriptorSet(Window_t* window) {
 
 	VkDescriptorPoolSize pool_sizes[4] = {0};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[0].descriptorCount = 6 * MAX_FRAMES_IN_FLIGHT; // materials + block mask + fine occupancy + model table + model voxels + entity data, per set
+	pool_sizes[0].descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT; // materials + model table + model voxels + entity data, per set
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	pool_sizes[1].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT; // camera, per set
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_sizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // output image + shared accum image, per set
 	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_sizes[3].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT; // world voxel texture, per set
+	pool_sizes[3].descriptorCount = 3 * MAX_FRAMES_IN_FLIGHT; // brick atlas + brick indirection + voxel occupancy textures, per set
 
 	VkDescriptorPoolCreateInfo pool_info = {0};
 	pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1641,9 +1922,17 @@ void createComputeDescriptorSet(Window_t* window) {
 	}
 
 	//static across every frame
-	VkDescriptorImageInfo world_texture_info = {0};
-	world_texture_info.imageView = window->vk_objects.worldVoxelTexture.outputImageView;
-	world_texture_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	VkDescriptorImageInfo brick_atlas_info = {0};
+	brick_atlas_info.imageView = window->vk_objects.brickAtlasTexture.outputImageView;
+	brick_atlas_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDescriptorImageInfo brick_indirection_info = {0};
+	brick_indirection_info.imageView = window->vk_objects.brickIndirectionTexture.outputImageView;
+	brick_indirection_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+	VkDescriptorImageInfo voxel_occupancy_info = {0};
+	voxel_occupancy_info.imageView = window->vk_objects.voxelOccupancyTexture.outputImageView;
+	voxel_occupancy_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkDescriptorBufferInfo material_properties_info = {0};
 	material_properties_info.buffer = window->vk_objects.materialProperitesBuffer.buffer;
@@ -1664,16 +1953,6 @@ void createComputeDescriptorSet(Window_t* window) {
 	VkDescriptorBufferInfo entity_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 10] = {0};
-
-	VkDescriptorBufferInfo world_grid_mask_info = {0};
-	world_grid_mask_info.buffer = window->vk_objects.worldGridMaskBuffer.buffer;
-	world_grid_mask_info.offset = 0;
-	world_grid_mask_info.range = VK_WHOLE_SIZE;
-
-	VkDescriptorBufferInfo world_grid_occ_info = {0};
-	world_grid_occ_info.buffer = window->vk_objects.worldGridOccBuffer.buffer;
-	world_grid_occ_info.offset = 0;
-	world_grid_occ_info.range = VK_WHOLE_SIZE;
 
 	//shared across every set
 	VkDescriptorImageInfo accum_image_info = {0};
@@ -1699,7 +1978,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[0].dstBinding = 1;
 		frame_writes[0].descriptorCount = 1;
 		frame_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		frame_writes[0].pImageInfo = &world_texture_info;
+		frame_writes[0].pImageInfo = &brick_atlas_info;
 
 		frame_writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[1].dstSet = window->vk_objects.computeDescriptorSet[i];
@@ -1733,15 +2012,15 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[5].dstSet = window->vk_objects.computeDescriptorSet[i];
 		frame_writes[5].dstBinding = 6;
 		frame_writes[5].descriptorCount = 1;
-		frame_writes[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		frame_writes[5].pBufferInfo = &world_grid_mask_info;
+		frame_writes[5].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		frame_writes[5].pImageInfo = &brick_indirection_info;
 
 		frame_writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[6].dstSet = window->vk_objects.computeDescriptorSet[i];
 		frame_writes[6].dstBinding = 7;
 		frame_writes[6].descriptorCount = 1;
-		frame_writes[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		frame_writes[6].pBufferInfo = &world_grid_occ_info;
+		frame_writes[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		frame_writes[6].pImageInfo = &voxel_occupancy_info;
 
 		frame_writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[7].dstSet = window->vk_objects.computeDescriptorSet[i];

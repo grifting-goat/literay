@@ -25,8 +25,10 @@
 #define MAX_ENTITIES           16U
 
 
-#define VOXEL_GRID_DIM 512U
-#define VOXEL_MASK_BLOCK_SIZE 8U // match BLOCK_SIZE in shader
+#define MAX_LOADED_VOXEL_DIM 512U // max voxels resident at once -> per axis
+#define VOXEL_BRICK_SIZE 8U // match BRICK_SIZE in shader
+
+#define EMPTY_SLOT 0xFFFFFFFFu
 
 
 #include "compute_res.h"
@@ -97,9 +99,18 @@ typedef struct {
     VkDescriptorPool computeDescriptorPool;
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
-    Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
-    Vk_Buffer_t worldGridMaskBuffer;
-    Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
+    Vk_Image_t brickAtlasTexture; //voxel data
+    Vk_Image_t brickIndirectionTexture; //brick location in atlas //world shaped
+    Vk_Image_t voxelOccupancyTexture; //is a voxel occupied //organized by chunk
+
+
+    //Vk_Image_t chunkOccupancyTexture; //does a chunk have a voxel
+
+    //Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
+    //Vk_Buffer_t worldGridMaskBuffer;
+    //Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
+
+
 
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
@@ -107,7 +118,7 @@ typedef struct {
 
     Vk_Buffer_t entityDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t modelBuffer;
-    Vk_Buffer_t modelVoxelBuffer; // every model's voxel material-ids, back to back; GpuModel.voxelOffset indexes into this
+    Vk_Buffer_t modelVoxelBuffer;
 
 
 } Vk_Objects_t;
@@ -130,7 +141,7 @@ void window_attach_device(Window_t* window);
 
 void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 
-void window_world_buffer_load(Window_t* window, World* wrld);
+void window_world_spawn_load(Window_t* window, World* wrld);
 
 void window_material_buffer_load(Window_t* window, Material* mat_list);
 

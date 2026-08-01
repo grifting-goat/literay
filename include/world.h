@@ -8,6 +8,10 @@
 #include "vector.h"
 
 
+#define CHUNK_DIM 32
+#define CHUNK_SIZE CHUNK_DIM * CHUNK_DIM * CHUNK_DIM
+
+
 typedef enum {
 
     MIRROR_PLANE = 0,
@@ -39,6 +43,22 @@ static Structure_t structure_list[STRUCTURE_COUNT];
 void structure_list_create(); //programaticly define structures
 
 
+//32^3 chunk size
+//8 ^3 brick size
+typedef struct {
+    uVector_t coord;
+    uint64_t brickMask;
+    bool dirty;
+    bool loaded;
+
+    uint8_t* voxels;
+    uint32_t* voxelMask;
+} Chunk;
+
+typedef struct {
+    uVector_t  key;
+    Chunk value;
+} ChunkMapEntry;
 
 
 typedef struct {
@@ -54,22 +74,21 @@ typedef struct {
 
     uint32_t seed;
     PerlinParams perlin_params;
-
-    uint8_t* voxels;
-    uint32_t world_size;
-
-    uint32_t* hieght_map;
-
-    uint32_t dimensions[3];
+    ChunkMapEntry* chunk_map;
 
 } World;
 
-World world_create(uint32_t dimensions[3]);
-void world_generate_terrain(World* wrld);
-void world_generate_structures(World* wrld);
+World world_create(uint32_t seed);
+
+void world_load_spawn_chunk(World* wrld);
+
+//void world_generate_terrain(World* wrld);
 
 
-void world_structure_place(World* wrld, StructureTypes type, uint32_t origin[3], uint32_t normal, uint32_t rotation, float scale, bool overwrite);
+//void world_generate_structures(World* wrld);
+
+
+//void world_structure_place(World* wrld, StructureTypes type, uint32_t origin[3], uint32_t normal, uint32_t rotation, float scale, bool overwrite);
 
 void world_destroy(World* wrld);
 

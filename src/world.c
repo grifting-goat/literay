@@ -7,6 +7,8 @@
 #include "material.h"
 #include "vox_loader.h"
 
+#include "stb_ds.h"
+
 
 
 //Claude made these for me
@@ -19,45 +21,226 @@ static double perlin_grad(int hash, double x, double y) {
 	return ((h & 1) ? -u : u) + ((h & 2) ? -2.0 * v : 2.0 * v);
 }
 
-void generate_terrain_heightmap(World* wrld);
+//void generate_terrain_heightmap(World* wrld);
+
+Chunk chunk_create(World* wrld, uVector_t coord);
+void chunk_generate_brick_map(Chunk* chunk);
+void chunk_generate_occupancy_mask(Chunk* chunk);
+void chunk_free(Chunk* chunk);
 
 
-World world_create(uint32_t dimensions[3]) {
+
+World world_create(uint32_t seed) {
 
     World wrld;
-
-
-    uint32_t x_size = dimensions[0];
-    uint32_t y_size = dimensions[1];
-    uint32_t z_size = dimensions[2];
-
-
-    wrld.dimensions[0] = x_size;
-    wrld.dimensions[1] = y_size;
-    wrld.dimensions[2] = z_size;
-    wrld.world_size = x_size * y_size * z_size;
-
-
-
     PerlinParams pp = {
-        .amplitude = 512.0f / 10,
+        .amplitude = CHUNK_DIM,
         .scale = 0.005f,
         .octaves = 6,
-        .sea_level = y_size * 0.5f
+        .sea_level = CHUNK_DIM / 2
     };
 
     wrld.perlin_params = pp;
 
-    wrld.voxels = calloc(wrld.world_size, sizeof(uint8_t));
-    wrld.hieght_map = calloc(x_size * z_size, sizeof(uint32_t));
+    wrld.seed = seed;
 
-    wrld.seed = 67;
-    structure_list_create();
+    wrld.chunk_map = NULL;
+
 
     return wrld;
 }
 
 
+void world_load_spawn_chunk(World* wrld) {
+
+    for (int x = 0; x < 16; x++) {
+        for (int y = 0; y < 16; y++) {
+            uVector_t coord = uVector_create(x, 0, y);
+            Chunk chunk = chunk_create(wrld, coord);
+            
+
+            chunk_generate_brick_map(&chunk);
+            chunk_generate_occupancy_mask(&chunk);
+
+            hmput(wrld->chunk_map, chunk.coord, chunk);
+        }
+    }
+
+
+
+}
+
+void chunk_generate_brick_map(Chunk* chunk) {
+    if (chunk == NULL || chunk->voxels == NULL) {return;}
+
+    uint8_t* voxels = chunk->voxels;
+    uint64_t mask = 0;
+    uint8_t brick_size = 8;
+    uint8_t bricks_per_axis = CHUNK_DIM >> 3;
+
+    //level 1
+    for (uint32_t bz = 0; bz < bricks_per_axis; bz++) {
+		for (uint32_t by = 0; by < bricks_per_axis; by++) {
+			for (uint32_t bx = 0; bx < bricks_per_axis; bx++) {
+
+                // level 2
+                bool solid = false;
+                for (uint32_t vz = 0; vz < brick_size && !solid; vz++) {
+					for (uint32_t vy = 0; vy < brick_size && !solid; vy++) {
+						for (uint32_t vx = 0; vx < brick_size; vx++) {
+							uint32_t x = bx * brick_size + vx;
+							uint32_t y = by * brick_size + vy;
+							uint32_t z = bz * brick_size + vz;
+							uint32_t idx = x + y * CHUNK_DIM + z * CHUNK_DIM * CHUNK_DIM;
+							if (voxels[idx] != 0) { solid = true; break; }
+						}
+					}
+				}
+                if (solid) {
+					uint32_t brick_index = bx + by * bricks_per_axis + bz * bricks_per_axis * bricks_per_axis;
+					mask |= (1ull << brick_index);
+				}
+
+            }
+        }
+    }
+
+    chunk->brickMask = mask;
+}
+
+
+void chunk_generate_occupancy_mask(Chunk* chunk) {
+    if (chunk == NULL || chunk->voxels == NULL) {return;}
+
+    uint8_t* voxels = chunk->voxels;
+    uint32_t* voxelMask = calloc(CHUNK_SIZE >> 5, sizeof(uint32_t));
+
+    for (uint32_t z = 0; z < CHUNK_DIM; z++) {
+		for (uint32_t y = 0; y < CHUNK_DIM; y++) {
+			for (uint32_t x = 0; x < CHUNK_DIM; x++) {
+                uint32_t idx = x + y * CHUNK_DIM + z * CHUNK_DIM * CHUNK_DIM;
+                if (voxels[idx] != 0) {
+                    voxelMask[idx >> 5] |= (1u << (idx & 31u));
+                }
+            }
+        }
+    }
+
+    chunk->voxelMask = voxelMask;
+
+}
+
+
+void chunk_free(Chunk* chunk) {
+    free(chunk->voxelMask); 
+    chunk->voxelMask = NULL;
+
+    free(chunk->voxels);
+    chunk->voxels = NULL;
+
+    chunk->loaded = false;
+}
+
+Chunk chunk_create(World* wrld, uVector_t coord) {
+
+    Chunk chunk = {0};
+    chunk.coord = coord;
+    chunk.voxels = calloc(CHUNK_SIZE, sizeof(uint8_t));
+
+	uint8_t dimX = CHUNK_DIM, dimY = CHUNK_DIM, dimZ = CHUNK_DIM;
+
+	int perm[256];
+	for (int i = 0; i < 256; i++) {perm[i] = i;}
+
+	unsigned int seed = wrld->seed;
+	for (int i = 255; i > 0; i--) {
+		seed = seed * 1664525u + 1013904223u;
+		int j = (int)(seed % (unsigned int)(i + 1));
+		int tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+	}
+
+	double baseScale = wrld->perlin_params.scale;
+	double amplitude = wrld->perlin_params.amplitude;
+	int octaves = wrld->perlin_params.octaves;
+
+	for (uint32_t z = 0; z < dimZ; z++) {
+		for (uint32_t x = 0; x < dimX; x++) {
+
+			double nx = (double)(coord.x * CHUNK_DIM + x) * baseScale;
+			double nz = (double)(coord.z * CHUNK_DIM + z) * baseScale;
+
+			double total = 0.0;
+			double freq = 1.0;
+			double amp = 1.0;
+			double maxAmp = 0.0;
+
+			for (int octave = 0; octave < octaves; octave++) {
+				double px = nx * freq;
+				double pz = nz * freq;
+
+				int xi = (int)floor(px);
+				int zi = (int)floor(pz);
+				int X = xi & 255;
+				int Z = zi & 255;
+				int X1 = (X + 1) & 255;
+				int Z1 = (Z + 1) & 255;
+				double xf = px - (double)xi;
+				double zf = pz - (double)zi;
+				double u = perlin_fade(xf);
+				double v = perlin_fade(zf);
+
+				int aa = perm[(perm[X] + Z) & 255];
+				int ba = perm[(perm[X1] + Z) & 255];
+				int ab = perm[(perm[X] + Z1) & 255];
+				int bb = perm[(perm[X1] + Z1) & 255];
+
+				double x1 = perlin_lerp(u, perlin_grad(aa, xf, zf), perlin_grad(ba, xf - 1.0, zf));
+				double x2 = perlin_lerp(u, perlin_grad(ab, xf, zf - 1.0), perlin_grad(bb, xf - 1.0, zf - 1.0));
+				double n = perlin_lerp(v, x1, x2);
+
+				total += n * amp;
+				maxAmp += amp;
+				freq *= 2.0;
+				amp *= 0.5;
+			}
+
+			double noiseValue = total / maxAmp;
+			int height = (int)((double)(dimY / 2) + noiseValue * amplitude);
+			if (height < 1) { height = 1; }
+			if (height >= (int)dimY) { height = (int)dimY - 1; }
+
+			for (int y = 0; y < height; y++) {
+				uint32_t idx = x + (uint32_t)y * dimX + z * dimX * dimY;
+				chunk.voxels[idx] = DIRT; // brown, fills down to the bottom of the grid
+			}
+
+            if ((uint32_t)height < wrld->perlin_params.sea_level) {
+                for (uint32_t y = height; y < wrld->perlin_params.sea_level; y++) {
+                    uint32_t idx = x + y * dimX + z * dimX * dimY;
+                    chunk.voxels[idx] = WATER;
+                }
+            }
+
+			uint32_t topIdx = x + (uint32_t)height * dimX + z * dimX * dimY;
+			chunk.voxels[topIdx] = (uint32_t)height > wrld->perlin_params.sea_level ? GRASS : SAND; // green, top block of the column
+		}
+	}
+
+	return chunk;
+}
+
+
+void world_destroy(World* wrld) {
+    for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
+        chunk_free(&wrld->chunk_map[i].value);
+    }
+    hmfree(wrld->chunk_map);
+    wrld->chunk_map = NULL;
+}
+
+
+
+/*
 void world_generate_terrain(World* wrld) {
 
     generate_terrain_heightmap(wrld);
@@ -368,8 +551,6 @@ void world_generate_structures(World* wrld) {
 
 }
 
-void world_destroy(World* wrld) {
-    free(wrld->voxels);
-    free(wrld->hieght_map);
-}
+*/
+
 

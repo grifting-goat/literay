@@ -7,6 +7,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
+#define STB_DS_IMPLEMENTATION
+#include "stb_ds.h"
+
+
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
 
@@ -22,29 +26,24 @@
 
 int main() {
 
-    Vector_t spawn = vector_create((VOXEL_GRID_DIM / 2), (VOXEL_GRID_DIM / 2), (VOXEL_GRID_DIM / 2));
+    Vector_t spawn = vector_create((CHUNK_DIM / 2), (CHUNK_DIM / 2) + 10.0f, (CHUNK_DIM / 2));
     Vector_t inital_angle = {0.0f};
 
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
-	material_palette_create();
+	window_attach_device(&window);
+
+	material_palette_create(); //dynamic for iterative purposes
 
 	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
 
 
-	uint32_t wrld_dim[3] = { VOXEL_GRID_DIM, VOXEL_GRID_DIM, VOXEL_GRID_DIM };
-	World wrld = world_create(wrld_dim);
-	world_generate_terrain(&wrld);
-	world_generate_structures(&wrld);
+	World wrld = world_create(67);
+	world_load_spawn_chunk(&wrld);
+    window_world_spawn_load(&window, &wrld);
+	
 
-	uint32_t spawnX = (uint32_t)spawn.x;
-	uint32_t spawnZ = (uint32_t)spawn.z;
-	cam.pos.y = wrld.hieght_map[spawnX + spawnZ * wrld_dim[2]] + 6.0f;
-
-    window_attach_device(&window);
-	//window_test_entity_upload(&window);
-    window_world_buffer_load(&window, &wrld);
 	window_material_buffer_load(&window, material_list);
 	window_model_buffer_load(&window, model_instance_list);
 

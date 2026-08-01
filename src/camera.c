@@ -69,9 +69,9 @@ void camera_position_controller(Window_t* window, Camera* cam, float frameTime) 
 	
 
 	if (glfwGetKey(window->glfw_window, GLFW_KEY_G) == GLFW_PRESS) {
-		cam->pos.x = VOXEL_GRID_DIM / 2;
-		cam->pos.y = VOXEL_GRID_DIM / 2;
-		cam->pos.z = VOXEL_GRID_DIM / 2;
+		cam->pos.x = MAX_LOADED_VOXEL_DIM / 2;
+		cam->pos.y = MAX_LOADED_VOXEL_DIM / 2;
+		cam->pos.z = MAX_LOADED_VOXEL_DIM / 2;
 	}
 
 	float moveLenSq = moveX * moveX + moveZ * moveZ;

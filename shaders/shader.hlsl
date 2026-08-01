@@ -1,6 +1,6 @@
-[[vk::binding(1, 0)]] Texture3D<uint> voxelsIn; // material ids, R8_UINT
-[[vk::binding(6, 0)]] ByteAddressBuffer voxelsMaskIn;
-[[vk::binding(7, 0)]] ByteAddressBuffer voxelsOccIn; // 1 bit per voxel
+[[vk::binding(1, 0)]] Texture3D<uint> brickAtlasIn; //atlas-packed BRICK_SIZE^3 bricks
+[[vk::binding(6, 0)]] Texture3D<uint> brickIndirectionIn; // brick coord
+[[vk::binding(7, 0)]] Texture3D<uint> voxelOccupancyIn; 
 
 struct Material {
     float4 color;
@@ -76,7 +76,9 @@ static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 static const uint MAX_BONUS_BOUNCES = 3;
 
-static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
+static const uint BRICK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
+static const uint BRICK_SIZE_SHIFT = 3; // log2(BRICK_SIZE)
+static const uint EMPTY_SLOT = 0xFFFFFFFFu; // must match EMPTY_SLOT in display.h
 
 static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
@@ -151,21 +153,26 @@ Ray CreateCameraRay(float x, float y) {
 }
 
 
-bool IsBlockSolid(uint blockIndex) {
-    uint word = voxelsMaskIn.Load((blockIndex >> 5) << 2);
-    uint bit = blockIndex & 31u;
+uint ReadBrickSlot(int3 brickCell) {
+    return brickIndirectionIn.Load(int4(brickCell, 0));
+}
+
+int3 DecodeAtlasSlot(uint slot) {
+    uint sx = slot & 0xFFu;
+    uint sy = (slot >> 8) & 0xFFu;
+    uint sz = (slot >> 16) & 0xFFu;
+    return int3(sx, sy, sz) * int(BRICK_SIZE);
+}
+
+// occupancy bit, addressed by world voxel coord
+bool IsVoxelSolid(int3 worldCell) {
+    uint word = voxelOccupancyIn.Load(int4(worldCell.x >> 5, worldCell.y, worldCell.z, 0));
+    uint bit = uint(worldCell.x) & 31u;
     return ((word >> bit) & 1u) != 0u;
 }
 
-// occupancy bit 
-bool IsVoxelSolid(uint index) {
-    uint word = voxelsOccIn.Load((index >> 5) << 2);
-    uint bit = index & 31u;
-    return ((word >> bit) & 1u) != 0u;
-}
-
-uint ReadVoxel(int3 cell) {
-    return voxelsIn.Load(int4(cell, 0));
+uint ReadAtlasVoxel(int3 atlasCell) {
+    return brickAtlasIn.Load(int4(atlasCell, 0));
 }
 
 
@@ -197,6 +204,8 @@ float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time o
 
 
 
+// dynamic/entity path temporarily disabled while the static path is rewritten for the brick atlas
+/*
 uint ReadModelVoxel(uint index) {
     uint word = modelVoxelsIn.Load(index & ~3u);
     return (word >> ((index & 3u) * 8u)) & 0xFFu;
@@ -211,6 +220,7 @@ bool TestAABB(Ray ray, float3 boundsMin, float3 boundsMax) {
     float tmax = min(min(tbig.x, tbig.y), tbig.z);
     return tmax >= tmin;
 }
+*/
 
 //standard dda voxel, over the static world grid
 Hit CastStaticRay(Ray ray) {
@@ -235,36 +245,34 @@ Hit CastStaticRay(Ray ray) {
     float3 tFarPerAxis = max(-ray.origin * invDir, (float3(pc._voxel_grid_size) - ray.origin) * invDir);
     float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.01f;
 
-    int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
-    int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
-    int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
+    int3 brickGridSize = pc._voxel_grid_size >> int(BRICK_SIZE_SHIFT);
 
-
-    int3 blockCell = cell / int(BLOCK_SIZE);
-    float3 blockNextBoundary = float3(blockCell) * BLOCK_SIZE + stepSign * BLOCK_SIZE;
-    float3 blockTMax = select(ray.direction != 0.0f, (blockNextBoundary - ray.origin) * invDir, FLT_INF);
-    float3 blockTDelta = tDelta * BLOCK_SIZE;
-    int blockIndex = blockCell.x + blockCell.y * blockGridSize.x + blockCell.z * blockGridSize.x * blockGridSize.y;
-    float blockTCurrent = 0.0f;
+    int3 brickCell = cell >> int(BRICK_SIZE_SHIFT);
+    float3 brickNextBoundary = float3(brickCell) * BRICK_SIZE + stepSign * BRICK_SIZE;
+    float3 brickTMax = select(ray.direction != 0.0f, (brickNextBoundary - ray.origin) * invDir, FLT_INF);
+    float3 brickTDelta = tDelta * BRICK_SIZE;
+    float brickTCurrent = 0.0f;
     float3 normal = float3(0.0f, 0.0f, 0.0f);
 
-    while (blockTCurrent < tExit) {
+    while (brickTCurrent < tExit) {
 
-        if (IsBlockSolid(uint(blockIndex))) {
-            float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
-            int3 blockMin = blockCell * int(BLOCK_SIZE);
-            int3 fineCell = clamp(int3(floor(pos)), blockMin, blockMin + int(BLOCK_SIZE) - 1);
+        uint slot = ReadBrickSlot(brickCell);
+        if (slot != EMPTY_SLOT) {
+            int3 atlasOrigin = DecodeAtlasSlot(slot);
 
-            float tCurrent = blockTCurrent;
+            float3 pos = ray.origin + ray.direction * (brickTCurrent + 0.01f);
+            int3 brickMin = brickCell << int(BRICK_SIZE_SHIFT);
+            int3 fineCell = clamp(int3(floor(pos)), brickMin, brickMin + int(BRICK_SIZE) - 1);
+
+            float tCurrent = brickTCurrent;
             float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
-            int voxelIndex = fineCell.x + fineCell.y * pc._voxel_grid_size.x + fineCell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
 
-            float blockBoundary = min(min(blockTMax.x, blockTMax.y), blockTMax.z) + 0.01f;
-            float blockExit = min(blockBoundary, tExit);
+            float brickBoundary = min(min(brickTMax.x, brickTMax.y), brickTMax.z) + 0.01f;
+            float brickExit = min(brickBoundary, tExit);
 
-            while (tCurrent < blockExit) {
-                if (IsVoxelSolid(uint(voxelIndex))) {
-                    hit.mat_type = ReadVoxel(fineCell);
+            while (tCurrent < brickExit) {
+                if (IsVoxelSolid(fineCell)) {
+                    hit.mat_type = ReadAtlasVoxel(atlasOrigin + (fineCell - brickMin));
                     hit.dist = tCurrent;
                     hit.normal = normal;
                     hit.end = ray.origin + ray.direction * tCurrent;
@@ -275,25 +283,24 @@ Hit CastStaticRay(Ray ray) {
                 tCurrent = dot(mask, tMax);
                 tMax += mask * tDelta;
                 normal = -mask * float3(istep);
-                voxelIndex += int(dot(mask, float3(idxStep)));
                 fineCell += int3(mask) * istep;
             }
         }
 
-        float3 blockMask = DDAStepMask(blockTMax);
-        blockTCurrent = dot(blockMask, blockTMax);
-        blockTMax += blockMask * blockTDelta;
-        normal = -blockMask * float3(istep);
+        float3 brickMask = DDAStepMask(brickTMax);
+        brickTCurrent = dot(brickMask, brickTMax);
+        brickTMax += brickMask * brickTDelta;
+        normal = -brickMask * float3(istep);
 
-        blockCell += int3(blockMask) * istep;
-        if (any(blockCell < 0) || any(blockCell >= blockGridSize)) {
+        brickCell += int3(brickMask) * istep;
+        if (any(brickCell < 0) || any(brickCell >= brickGridSize)) {
             break;
         }
-        blockIndex += int(dot(blockMask, float3(blockIdxStep)));
     }
     return hit;
 }
 
+/*
 Hit CastEntityRay(Ray ray, Entity ent) {
 
     Hit hit;
@@ -405,16 +412,11 @@ Hit CastDynamicRay(Ray ray, int skipIndex) {
     }
     return best;
 }
+*/
 
 // skipIndex < 0 tests every entity; otherwise that single entity slot is excluded
 Hit CastRay(Ray ray, int skipIndex) {
-    Hit staticHit = CastStaticRay(ray);
-
-    Hit dynamicHit = CastDynamicRay(ray, skipIndex);
-    if (dynamicHit.dist < staticHit.dist) {
-        return dynamicHit;
-    }
-    return staticHit;
+    return CastStaticRay(ray);
 }
 
 float3 Reflect(float3 dir, float3 normal) {

@@ -2,6 +2,8 @@
 #define VECTOR_H
 
 #include <math.h>
+#include <stdint.h>
+
 
 typedef struct Vector_t {
     float x;
@@ -9,8 +11,22 @@ typedef struct Vector_t {
     float z;
 } Vector_t;
 
+typedef struct uVector_t {
+    uint32_t x;
+    uint32_t y;
+    uint32_t z;
+} uVector_t;
+
+typedef struct iVector_t {
+    int32_t x;
+    int32_t y;
+    int32_t z;
+} iVector_t;
+
 
 Vector_t vector_create(float x, float y, float z);
+uVector_t uVector_create(uint32_t x, uint32_t y, uint32_t z);
+iVector_t iVector_create(int32_t x, int32_t y, int32_t z);
 
 float vector_magnitude(const Vector_t* vec);
 Vector_t vector_add(const Vector_t* a, const Vector_t* b);
