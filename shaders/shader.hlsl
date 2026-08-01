@@ -26,22 +26,26 @@ cbuffer CameraData {
 struct Entity {
     float4 position; // xyz used, w padding
     float4 rotation; // xyz used, w padding
-    float scale;
+
+    // conservative world-space AABB (valid under any yaw), precomputed on the CPU
+    float4 worldMin;
+    float4 worldMax;
+
+    float scale; // scale <= 0 marks an unused slot
     uint modelIdx;
 };
-[[vk::binding(8, 0)]]
-cbuffer EntityDataBuffer {
-    Entity entity;
-};
+[[vk::binding(8, 0)]] StructuredBuffer<Entity> entities;
 
 struct Model {
-    uint2 _voxelsPtr;
+    uint voxelOffset; // index into modelVoxelsIn where this model's voxels start
     uint axes; // byte0 = up_axis, byte1 = cardinal_axis
-    uint3 dimensions;
+    uint dimX;
+    uint dimY;
+    uint dimZ;
     uint size;
-    uint _pad;
 };
 [[vk::binding(9, 0)]] StructuredBuffer<Model> models;
+[[vk::binding(10, 0)]] ByteAddressBuffer modelVoxelsIn; // every model's voxel material-ids, back to back
 
 [[vk::binding(4, 0)]]
 [[vk::image_format("rgba8")]]
@@ -67,7 +71,7 @@ static const float FLT_INF = asfloat(0x7F800000);
 static const float MAX_RAY_DISTANCE = 400.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
-static const uint MAX_BONUS_BOUNCES = 4;
+static const uint MAX_BONUS_BOUNCES = 2;
 
 static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
 
@@ -93,6 +97,7 @@ struct Hit {
     float3 end;
     float3 normal;
     uint mat_type;
+    bool isEntity;
 };
 
 //RNG //https://github.com/SebLague/Ray-Tracing
@@ -189,220 +194,30 @@ float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time o
 
 
 
-/*
-uint ReadEntityVoxel(uint index) {
-    uint word = entityVoxelsIn.Load(index & ~3u);
+uint ReadModelVoxel(uint index) {
+    uint word = modelVoxelsIn.Load(index & ~3u);
     return (word >> ((index & 3u) * 8u)) & 0xFFu;
 }
 
-*/
-/*
-void TestAABB(Ray r, Entity ent) {
+bool TestAABB(Ray ray, float3 boundsMin, float3 boundsMax) {
+    float3 t0 = (boundsMin - ray.origin) * ray.invDir;
+    float3 t1 = (boundsMax - ray.origin) * ray.invDir;
+    float3 tsmall = min(t0, t1);
+    float3 tbig = max(t0, t1);
+    float tmin = max(max(tsmall.x, tsmall.y), max(tsmall.z, 0.0f));
+    float tmax = min(min(tbig.x, tbig.y), tbig.z);
+    return tmax >= tmin;
+}
 
-    float tmin, tmax, tymin, tymax, tzmin, tzmax;
-    
-    tmin = (bounds[r.sign[0]].x - r.origin.x) * r.invdir.x;
-    tmax = (bounds[1-r.sign[0]].x - r.origin.x) * r.invdir.x;
-    tymin = (bounds[r.sign[1]].y - r.origin.y) * r.invdir.y;
-    tymax = (bounds[1-r.sign[1]].y - r.origin.y) * r.invdir.y;
-    
-    if ((tmin > tymax) || (tymin > tmax))
-        return false;
-
-    if (tymin > tmin)
-        tmin = tymin;
-    if (tymax < tmax)
-        tmax = tymax;
-    
-    tzmin = (bounds[r.sign[2]].z - r.origin.z) * r.invdir.z;
-    tzmax = (bounds[1-r.sign[2]].z - r.origin.z) * r.invdir.z;
-    
-    if ((tmin > tzmax) || (tzmin > tmax))
-        return false;
-
-    if (tzmin > tmin)
-        tmin = tzmin;
-    if (tzmax < tmax)
-        tmax = tzmax;
-
-    return true;
-}*/
-
-/*
-//standard dda voxel
+//standard dda voxel, over the static world grid
 Hit CastStaticRay(Ray ray) {
-    
-    Hit hit;
-    hit.mat_type = 0;
-    hit.dist = FLT_INF;
-    hit.end = float3(0.0f, 0.0f, 0.0f);
-    hit.normal = float3(0.0f, 0.0f, 0.0f);
-
-    int3 cell = int3(floor(ray.origin));
-    if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
-        return hit;
-    }
-
-    int3 istep = int3(sign(ray.direction));
-    float3 tDelta = abs(invDir);
-    float3 stepSign = max(sign(ray.direction), 0.0f);
-
-    float3 tFarPerAxis = max(-ray.origin * invDir, (float3(pc._voxel_grid_size) - ray.origin) * invDir);
-    float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.01f;
-
-    int3 idxStep = istep * int3(1, pc._voxel_grid_size.x, pc._voxel_grid_size.x * pc._voxel_grid_size.y);
-    int3 blockGridSize = pc._voxel_grid_size / int(BLOCK_SIZE);
-    int3 blockIdxStep = istep * int3(1, blockGridSize.x, blockGridSize.x * blockGridSize.y);
-
-
-    int3 blockCell = cell / int(BLOCK_SIZE);
-    float3 blockNextBoundary = float3(blockCell) * BLOCK_SIZE + stepSign * BLOCK_SIZE;
-    float3 blockTMax = select(ray.direction != 0.0f, (blockNextBoundary - ray.origin) * invDir, FLT_INF);
-    float3 blockTDelta = tDelta * BLOCK_SIZE;
-    int blockIndex = blockCell.x + blockCell.y * blockGridSize.x + blockCell.z * blockGridSize.x * blockGridSize.y;
-    float blockTCurrent = 0.0f;
-    float3 normal = float3(0.0f, 0.0f, 0.0f);
-
-    while (blockTCurrent < tExit) {
-
-        if (IsBlockSolid(uint(blockIndex))) {
-            float3 pos = ray.origin + ray.direction * (blockTCurrent + 0.01f);
-            int3 blockMin = blockCell * int(BLOCK_SIZE);
-            int3 fineCell = clamp(int3(floor(pos)), blockMin, blockMin + int(BLOCK_SIZE) - 1);
-
-            float tCurrent = blockTCurrent;
-            float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
-            int voxelIndex = fineCell.x + fineCell.y * pc._voxel_grid_size.x + fineCell.z * pc._voxel_grid_size.x * pc._voxel_grid_size.y;
-
-            float blockBoundary = min(min(blockTMax.x, blockTMax.y), blockTMax.z) + 0.01f;
-            float blockExit = min(blockBoundary, tExit);
-
-            while (tCurrent < blockExit) {
-                if (IsVoxelSolid(uint(voxelIndex))) {
-                    hit.mat_type = ReadVoxel(fineCell);
-                    hit.dist = tCurrent;
-                    hit.normal = normal;
-                    hit.end = ray.origin + ray.direction * tCurrent;
-                    return hit;
-                }
-
-                float3 mask = DDAStepMask(tMax);
-                tCurrent = dot(mask, tMax);
-                tMax += mask * tDelta;
-                normal = -mask * float3(istep);
-                voxelIndex += int(dot(mask, float3(idxStep)));
-                fineCell += int3(mask) * istep;
-            }
-        }
-
-        float3 blockMask = DDAStepMask(blockTMax);
-        blockTCurrent = dot(blockMask, blockTMax);
-        blockTMax += blockMask * blockTDelta;
-        normal = -blockMask * float3(istep);
-
-        blockCell += int3(blockMask) * istep;
-        if (any(blockCell < 0) || any(blockCell >= blockGridSize)) {
-            break;
-        }
-        blockIndex += int(dot(blockMask, float3(blockIdxStep)));
-    }
-    return hit;
-    
-}
-
-//intersect with non-grid aligned voxels, bounding boxes with own coord system
-
-Hit CastDynamicRay(Ray ray) {
 
     Hit hit;
     hit.mat_type = 0;
     hit.dist = FLT_INF;
     hit.end = float3(0.0f, 0.0f, 0.0f);
     hit.normal = float3(0.0f, 0.0f, 0.0f);
-
-
-    for (uint i = 0; i < 1; i++) { //loops over the one entity dta for now
-         if (!TestAABB(ray, entityBuffer[i])) {
-            return hit;
-         }
-
-        //might want to move this to the TestAABB if its faster
-        float s, c;
-        sincos(-entityBuffer[i].rotation[yaw], s, c); //sudo code
-
-        float3 rel = ray.origin - pc.entity_pos;
-        float3 rotatedRel = float3(c * rel.x - s * rel.z, rel.y, s * rel.x + c * rel.z);
-        float3 rotatedDir = float3(c * ray.direction.x - s * ray.direction.z, ray.direction.y, s * ray.direction.x + c * ray.direction.z);
-        float3 lo = rotatedRel / pc.entity_scale + float3(dim.x * 0.5f, 0.0f, dim.z * 0.5f);
-        float3 ld = rotatedDir / pc.entity_scale;
-
-        float3 invD = rcp(ld);
-        float3 t0 = (0.0f - lo) * invD;
-        float3 t1 = (float3(dim) - lo) * invD;
-        float3 tmin3 = min(t0, t1);
-        float3 tmax3 = max(t0, t1);
-        float tEnter = max(max(tmin3.x, tmin3.y), max(tmin3.z, 0.0f));
-        float tExit = min(min(tmax3.x, tmax3.y), tmax3.z) - 0.001f;
-        if (tExit <= tEnter) {
-            return hit;
-        }
-
-        int3 istep = int3(sign(ld));
-        float3 tDelta = abs(invD);
-        float3 stepSign = max(sign(ld), 0.0f);
-
-        float3 p = lo + ld * (tEnter + 0.001f);
-        int3 cell = clamp(int3(floor(p)), int3(0, 0, 0), dim - 1);
-        float3 tMax = select(ld != 0.0f, (float3(cell) + stepSign - lo) * invD, FLT_INF);
-        float tCurrent = tEnter;
-        float3 entryMask = select(tmin3 == tEnter, 1.0f, 0.0f);
-        float3 lnormal = -entryMask * float3(istep);
-
-        while (tCurrent < tExit) {
-            uint idx = uint(cell.x + cell.y * dim.x + cell.z * dim.x * dim.y);
-            uint mat = ReadEntityVoxel(idx);
-            if (mat != 0) {
-                hit.mat_type = mat;
-                hit.dist = tCurrent;
-                hit.end = ray.origin + ray.direction * tCurrent;
-                hit.normal = float3(c * lnormal.x + s * lnormal.z, lnormal.y, -s * lnormal.x + c * lnormal.z);
-                hit.isEntity = true;
-                return hit;
-            }
-
-            float3 mask = DDAStepMask(tMax);
-            tCurrent = dot(mask, tMax);
-            tMax += mask * tDelta;
-            lnormal = -mask * float3(istep);
-            cell += int3(mask) * istep;
-            if (any(cell < 0) || any(cell >= dim)) {
-                break;
-            }
-        }
-        return hit;
-    }
-
-
-}
-
-Hit NewCastRay(Ray ray) {
-    Hit staticHit = CastStaticRay(ray);
-    Hit dynamicHit = CastDynamicRay(ray);
-
-    if (staticHit.dist > dynamicHit.dist) {
-        return dynamicHit;
-    }
-    return staticHit;
-
-}*/
-
-Hit CastRay(Ray ray) {
-
-    Hit hit;
-    hit.mat_type = 0;
-    hit.dist = FLT_INF;
-    hit.end = float3(0.0f, 0.0f, 0.0f);
-    hit.normal = float3(0.0f, 0.0f, 0.0f);
+    hit.isEntity = false;
 
     int3 cell = int3(floor(ray.origin));
     if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
@@ -476,6 +291,129 @@ Hit CastRay(Ray ray) {
     return hit;
 }
 
+Hit CastEntityRay(Ray ray, Entity ent) {
+
+    Hit hit;
+    hit.mat_type = 0;
+    hit.dist = FLT_INF;
+    hit.end = float3(0.0f, 0.0f, 0.0f);
+    hit.normal = float3(0.0f, 0.0f, 0.0f);
+    hit.isEntity = false;
+
+    if (ent.scale <= 0.0f) { // unused slot
+        return hit;
+    }
+
+    uint modelCount, modelStride;
+    models.GetDimensions(modelCount, modelStride);
+    if (ent.modelIdx >= modelCount) {
+        return hit;
+    }
+
+    Model model = models[ent.modelIdx];
+    if (model.size == 0) {
+        return hit;
+    }
+
+    if (!TestAABB(ray, ent.worldMin.xyz, ent.worldMax.xyz)) {
+        return hit;
+    }
+
+    float3 dim = float3(model.dimX, model.dimY, model.dimZ);
+
+    float s, c;
+    sincos(-ent.rotation.y, s, c); 
+
+    // transform the ray into the models local voxel space
+    float3 rel = ray.origin - ent.position.xyz;
+    float3 rotatedRel = float3(c * rel.x - s * rel.z, rel.y, s * rel.x + c * rel.z);
+    float3 rotatedDir = float3(c * ray.direction.x - s * ray.direction.z, ray.direction.y, s * ray.direction.x + c * ray.direction.z);
+
+    float3 lo = rotatedRel / ent.scale + float3(dim.x * 0.5f, 0.0f, dim.z * 0.5f);
+    float3 ld = rotatedDir / ent.scale;
+
+    float3 invD = rcp(ld);
+    float3 t0 = (0.0f - lo) * invD;
+    float3 t1 = (dim - lo) * invD;
+    float3 tmin3 = min(t0, t1);
+    float3 tmax3 = max(t0, t1);
+    float tEnter = max(max(tmin3.x, tmin3.y), max(tmin3.z, 0.0f));
+    float tExit = min(min(tmax3.x, tmax3.y), tmax3.z) - 0.001f;
+    if (tExit <= tEnter) {
+        return hit;
+    }
+
+    int3 idim = int3(model.dimX, model.dimY, model.dimZ);
+    int3 istep = int3(sign(ld));
+    float3 tDelta = abs(invD);
+    float3 stepSign = max(sign(ld), 0.0f);
+
+    float3 p = lo + ld * (tEnter + 0.001f);
+    int3 cell = clamp(int3(floor(p)), int3(0, 0, 0), idim - 1);
+    float3 tMax = select(ld != 0.0f, (float3(cell) + stepSign - lo) * invD, FLT_INF);
+    float tCurrent = tEnter;
+    float3 entryMask = select(tmin3 == tEnter, 1.0f, 0.0f);
+    float3 lnormal = -entryMask * float3(istep);
+
+    while (tCurrent < tExit) {
+        uint localIdx = uint(cell.x + cell.y * idim.x + cell.z * idim.x * idim.y);
+        uint mat = ReadModelVoxel(model.voxelOffset + localIdx);
+        if (mat != 0) {
+            hit.mat_type = mat;
+            hit.dist = tCurrent;
+            hit.end = ray.origin + ray.direction * tCurrent;
+            hit.normal = float3(c * lnormal.x + s * lnormal.z, lnormal.y, -s * lnormal.x + c * lnormal.z);
+            hit.isEntity = true;
+            return hit;
+        }
+
+        float3 mask = DDAStepMask(tMax);
+        tCurrent = dot(mask, tMax);
+        tMax += mask * tDelta;
+        lnormal = -mask * float3(istep);
+        cell += int3(mask) * istep;
+        if (any(cell < 0) || any(cell >= idim)) {
+            break;
+        }
+    }
+    return hit;
+}
+
+//tests every entity slot except skipIndex and keeps the closest hit
+Hit CastDynamicRay(Ray ray, int skipIndex) {
+    Hit best;
+    best.mat_type = 0;
+    best.dist = FLT_INF;
+    best.end = float3(0.0f, 0.0f, 0.0f);
+    best.normal = float3(0.0f, 0.0f, 0.0f);
+    best.isEntity = false;
+
+    uint entityCount, entityStride;
+    entities.GetDimensions(entityCount, entityStride);
+
+    for (uint i = 0; i < entityCount; i++) {
+        if (int(i) == skipIndex) {
+            continue;
+        }
+        Hit hit = CastEntityRay(ray, entities[i]);
+        if (hit.dist < best.dist) {
+            best = hit;
+        }
+    }
+    return best;
+}
+
+// skipIndex < 0 tests every entity; otherwise that single entity slot is excluded
+Hit CastRay(Ray ray, int skipIndex) {
+    Hit staticHit = CastStaticRay(ray);
+
+    Hit dynamicHit = CastDynamicRay(ray, skipIndex);
+    if (dynamicHit.dist < staticHit.dist) {
+        return dynamicHit;
+    }
+    return staticHit;
+}
+
 float3 Reflect(float3 dir, float3 normal) {
     return dir - 2 * dot(dir, normal) * normal;
 }
@@ -502,14 +440,14 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
         Ray r = CreateCameraRay(x, y);
         for (uint bounces = 0; bounces < MAX_BOUNCES + bonus; bounces++) {
-            Hit hit = CastRay(r);
+            Hit hit = CastRay(r, bounces == 0 ? 0 : -1); // skip entity 0 (the player) only on the ray straight from the camera, so the player doesn't see themselves
             if (hit.mat_type != 0) {
                 Material mat = materials[hit.mat_type];
 
                 //shadow ray
                 if (!bounces || bonus == 1) { //keep shdows in mirrors
                     Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), pc.sun_direction);
-                    Hit shadowHit = CastRay(shadow);
+                    Hit shadowHit = CastRay(shadow, -1);
 
                     if (shadowHit.mat_type == 0) { 
                         float sunAmount = saturate(dot(hit.normal, pc.sun_direction));
@@ -560,13 +498,3 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     outputImage[pixel] = float4(accum, 1.0f);
 
 }
-
-/*
-    outputImage[pixel] = float4(
-        r.direction.x > 0 ? r.direction.x : 0.0,
-        r.direction.y > 0 ? r.direction.y : 0.0,
-        r.direction.z > 0 ? r.direction.z : 0.0,
-        1.0f
-    );
-
-*/

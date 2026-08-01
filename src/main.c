@@ -28,9 +28,10 @@ int main() {
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
+	material_palette_create();
+
 	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
 
-	material_palette_create();
 
 	uint32_t wrld_dim[3] = { VOXEL_GRID_DIM, VOXEL_GRID_DIM, VOXEL_GRID_DIM };
 	World wrld = world_create(wrld_dim);
@@ -42,6 +43,7 @@ int main() {
 	cam.pos.y = wrld.hieght_map[spawnX + spawnZ * wrld_dim[2]] + 6.0f;
 
     window_attach_device(&window);
+	//window_test_entity_upload(&window);
     window_world_buffer_load(&window, &wrld);
 	window_material_buffer_load(&window, material_list);
 	window_model_buffer_load(&window, model_instance_list);

@@ -124,7 +124,9 @@ void window_camera_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 }
 
 void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res_index) {
-	EntityData* entity = (EntityData*)window->vk_objects.entityDataBuffer[frame_res_index].mapped;
+	// slot 0 tracks the camera as a placeholder entity; the rest stay zeroed from buffer creation (scale == 0 == inactive)
+	EntityData entities[1] = {0};
+	EntityData* entity = &entities[0];
 
 	entity->position[0] = c->pos.x;
 	entity->position[1] = c->pos.y;
@@ -134,10 +136,73 @@ void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 	entity->rotation[1] = c->angle.y;
 	entity->rotation[2] = c->angle.z;
 
-	entity->scale = 1.0f;
-
 	entity->modelIdx = 0;
+
+	Model_t* model = &model_instance_list[entity->modelIdx];
+	float dimX = (float)model->dimensions[0];
+	float dimY = (float)model->dimensions[1];
+	float dimZ = (float)model->dimensions[2];
+
+	entity->scale = 4.0f / dimY;
+	entity->position[1] -= 3.0f;
+
+	float halfDiag = 0.5f * sqrtf(dimX * dimX + dimZ * dimZ) * entity->scale;
+
+	entity->worldMin[0] = entity->position[0] - halfDiag;
+	entity->worldMin[1] = entity->position[1];
+	entity->worldMin[2] = entity->position[2] - halfDiag;
+
+	entity->worldMax[0] = entity->position[0] + halfDiag;
+	entity->worldMax[1] = entity->position[1] + dimY * entity->scale;
+	entity->worldMax[2] = entity->position[2] + halfDiag;
+
+
+
+	memcpy(window->vk_objects.entityDataBuffer[frame_res_index].mapped, entity, sizeof(EntityData));
 }
+
+void window_test_entity_upload(Window_t* window) {
+	EntityData entities[MAX_ENTITIES] = {0};
+	float center = VOXEL_GRID_DIM / 2 ;
+	for (int i = 1; i < MAX_ENTITIES; i++) {
+		EntityData* entity = &entities[i];
+		entity->position[0] =  (float)(rand() % 100 - 50) + center;
+		entity->position[1] =  (float)(rand() % 100 - 50) + center + 60.0f;
+		entity->position[2] =  (float)(rand() % 100 - 50) + center;
+
+		entity->rotation[0] = (float) (rand() % 360) * (M_PI / 180);
+		entity->rotation[1] = (float) (rand() % 360) * (M_PI / 180);
+		entity->rotation[2] = (float) (rand() % 360) * (M_PI / 180);
+
+		entity->modelIdx = rand() % 3 + 1;
+
+		
+		Model_t* model = &model_instance_list[entity->modelIdx];
+		float dimX = (float)model->dimensions[0];
+		float dimY = (float)model->dimensions[1];
+		float dimZ = (float)model->dimensions[2];
+
+		entity->scale = ((float)(rand() % 10) * 0.5f + 1.0f) / dimY;
+		entity->position[1] -= 3.0f;
+
+		float halfDiag = 0.5f * sqrtf(dimX * dimX + dimZ * dimZ) * entity->scale;
+
+		entity->worldMin[0] = entity->position[0] - halfDiag;
+		entity->worldMin[1] = entity->position[1];
+		entity->worldMin[2] = entity->position[2] - halfDiag;
+
+		entity->worldMax[0] = entity->position[0] + halfDiag;
+		entity->worldMax[1] = entity->position[1] + dimY * entity->scale;
+		entity->worldMax[2] = entity->position[2] + halfDiag;
+		
+	}
+
+	memcpy(window->vk_objects.entityDataBuffer[0].mapped, entities, sizeof(entities));
+	memcpy(window->vk_objects.entityDataBuffer[1].mapped, entities, sizeof(entities));
+
+}
+
+
 
 void window_render(Window_t* window, Camera* cam, Vector_t sun_direction) {
 	static uint64_t timeline_value = 0;
@@ -1019,7 +1084,7 @@ void createSwapchain(Window_t* window) {
 void createComputePipeline(Window_t* window) {
 	Pipeline_t pipeline = {0};
 
-	VkDescriptorSetLayoutBinding bindings[9] = {0};
+	VkDescriptorSetLayoutBinding bindings[10] = {0};
 	bindings[0].binding = 1;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // 3D world voxel texture
 	bindings[0].descriptorCount = 1;
@@ -1056,7 +1121,7 @@ void createComputePipeline(Window_t* window) {
 	bindings[6].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
 	bindings[7].binding = 8;
-	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; // entity data
+	bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // entity data (array)
 	bindings[7].descriptorCount = 1;
 	bindings[7].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
@@ -1065,9 +1130,14 @@ void createComputePipeline(Window_t* window) {
 	bindings[8].descriptorCount = 1;
 	bindings[8].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
+	bindings[9].binding = 10;
+	bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; // model voxel data
+	bindings[9].descriptorCount = 1;
+	bindings[9].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
 	VkDescriptorSetLayoutCreateInfo set_layout_info = {0};
 	set_layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	set_layout_info.bindingCount = 9;
+	set_layout_info.bindingCount = 10;
 	set_layout_info.pBindings = bindings;
 
 	if (vkCreateDescriptorSetLayout(window->vk_objects.device, &set_layout_info, NULL, &window->vk_objects.computeDescriptorSetLayout) != VK_SUCCESS) {
@@ -1406,11 +1476,18 @@ void createComputeBuffers(Window_t* window) {
 	}
 
 	for (uint32_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
-		window->vk_objects.entityDataBuffer[i] = createHostVisibleBuffer(window, sizeof(EntityData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+		window->vk_objects.entityDataBuffer[i] = createHostVisibleBuffer(window, (VkDeviceSize)MAX_ENTITIES * sizeof(EntityData), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 	}
 
-	VkDeviceSize model_size = (VkDeviceSize)MAX_MODELS * sizeof(Model_t);
+	VkDeviceSize model_size = (VkDeviceSize)MAX_MODELS * sizeof(GpuModel);
 	window->vk_objects.modelBuffer = createDeviceLocalBuffer(window, model_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+
+	VkDeviceSize model_voxels_size = 0;
+	for (uint32_t i = 0; i < MAX_MODELS; i++) {
+		model_voxels_size += model_instance_list[i].size;
+	}
+	if (model_voxels_size == 0) { model_voxels_size = 1; } // buffers can't be zero-sized
+	window->vk_objects.modelVoxelBuffer = createDeviceLocalBuffer(window, model_voxels_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
 	printf("compute buffers created.\n");
 }
@@ -1481,14 +1558,45 @@ void window_material_buffer_load(Window_t* window, Material* mat_list) {
 
 void window_model_buffer_load(Window_t* window, Model_t* model_list) {
 
-	Model_t models[MAX_MODELS] = {0};
+	GpuModel gpu_models[MAX_MODELS] = {0};
+
+	VkDeviceSize total_voxels_size = 0;
+	for (uint32_t i = 0; i < MAX_MODELS; i++) {
+		printf("model[%u]: dims=(%u,%u,%u) size=%u voxels=%p\n", i,
+			model_list[i].dimensions[0], model_list[i].dimensions[1], model_list[i].dimensions[2],
+			model_list[i].size, (void*)model_list[i].voxels);
+		total_voxels_size += model_list[i].size;
+	}
+	printf("window_model_buffer_load: total_voxels_size=%llu bytes\n", (unsigned long long)total_voxels_size);
+	if (total_voxels_size == 0) { total_voxels_size = 1; }
+
+	uint8_t* packed_voxels = calloc((size_t)total_voxels_size, 1);
+	if (packed_voxels == NULL) {
+		printf("failed to allocate packed model voxel buffer (%llu bytes)\n", (unsigned long long)total_voxels_size);
+		return;
+	}
+	uint32_t offset = 0;
 
 	for (uint32_t i = 0; i < MAX_MODELS; i++) {
-		models[i] = model_list[i]; //future stuff
+		Model_t* model = &model_list[i];
+
+		gpu_models[i].voxelOffset = offset;
+		gpu_models[i].axes = (uint32_t)model->up_axis | ((uint32_t)model->cardinal_axis << 8);
+		gpu_models[i].dimensions[0] = model->dimensions[0];
+		gpu_models[i].dimensions[1] = model->dimensions[1];
+		gpu_models[i].dimensions[2] = model->dimensions[2];
+		gpu_models[i].size = model->size;
+
+		if (model->size > 0 && model->voxels != NULL) {
+			memcpy(packed_voxels + offset, model->voxels, model->size);
+		}
+		offset += model->size;
 	}
 
-	uploadBufferData(window, window->vk_objects.modelBuffer.buffer, models, sizeof(models));
+	uploadBufferData(window, window->vk_objects.modelBuffer.buffer, gpu_models, sizeof(gpu_models));
+	uploadBufferData(window, window->vk_objects.modelVoxelBuffer.buffer, packed_voxels, total_voxels_size);
 
+	free(packed_voxels);
 }
 
 
@@ -1496,9 +1604,9 @@ void createComputeDescriptorSet(Window_t* window) {
 
 	VkDescriptorPoolSize pool_sizes[4] = {0};
 	pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	pool_sizes[0].descriptorCount = 4 * MAX_FRAMES_IN_FLIGHT; // materials + block mask + fine occupancy + model table, per set
+	pool_sizes[0].descriptorCount = 6 * MAX_FRAMES_IN_FLIGHT; // materials + block mask + fine occupancy + model table + model voxels + entity data, per set
 	pool_sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	pool_sizes[1].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // camera + entity, per set
+	pool_sizes[1].descriptorCount = 1 * MAX_FRAMES_IN_FLIGHT; // camera, per set
 	pool_sizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_sizes[2].descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT; // output image + shared accum image, per set
 	pool_sizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -1547,10 +1655,15 @@ void createComputeDescriptorSet(Window_t* window) {
 	model_buffer_info.offset = 0;
 	model_buffer_info.range = VK_WHOLE_SIZE;
 
+	VkDescriptorBufferInfo model_voxel_buffer_info = {0};
+	model_voxel_buffer_info.buffer = window->vk_objects.modelVoxelBuffer.buffer;
+	model_voxel_buffer_info.offset = 0;
+	model_voxel_buffer_info.range = VK_WHOLE_SIZE;
+
 	VkDescriptorBufferInfo camera_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorBufferInfo entity_data_infos[MAX_FRAMES_IN_FLIGHT] = {0};
 	VkDescriptorImageInfo image_infos[MAX_FRAMES_IN_FLIGHT] = {0};
-	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 9] = {0};
+	VkWriteDescriptorSet writes[MAX_FRAMES_IN_FLIGHT * 10] = {0};
 
 	VkDescriptorBufferInfo world_grid_mask_info = {0};
 	world_grid_mask_info.buffer = window->vk_objects.worldGridMaskBuffer.buffer;
@@ -1579,7 +1692,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		image_infos[i].imageView = window->vk_objects.outputImageRes[i].outputImageView;
 		image_infos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-		VkWriteDescriptorSet *frame_writes = &writes[i * 9];
+		VkWriteDescriptorSet *frame_writes = &writes[i * 10];
 
 		frame_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		frame_writes[0].dstSet = window->vk_objects.computeDescriptorSet[i];
@@ -1634,7 +1747,7 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[7].dstSet = window->vk_objects.computeDescriptorSet[i];
 		frame_writes[7].dstBinding = 8;
 		frame_writes[7].descriptorCount = 1;
-		frame_writes[7].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		frame_writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		frame_writes[7].pBufferInfo = &entity_data_infos[i];
 
 		frame_writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1643,9 +1756,16 @@ void createComputeDescriptorSet(Window_t* window) {
 		frame_writes[8].descriptorCount = 1;
 		frame_writes[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 		frame_writes[8].pBufferInfo = &model_buffer_info;
+
+		frame_writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		frame_writes[9].dstSet = window->vk_objects.computeDescriptorSet[i];
+		frame_writes[9].dstBinding = 10;
+		frame_writes[9].descriptorCount = 1;
+		frame_writes[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		frame_writes[9].pBufferInfo = &model_voxel_buffer_info;
 	}
 
-	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 9, writes, 0, NULL);
+	vkUpdateDescriptorSets(window->vk_objects.device, MAX_FRAMES_IN_FLIGHT * 10, writes, 0, NULL);
 
 	printf("compute descriptor set created.\n");
 }

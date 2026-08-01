@@ -63,6 +63,9 @@ static int32_t vox_read_i32(FILE* fp) {
 // caller must free the returned buffer
 static char* vox_read_string(FILE* fp) {
     int32_t len = vox_read_i32(fp);
+    if (len < 0 || len > 65536) { // sane upper bound; real vox metadata strings are tiny
+        len = 0; // treat a corrupt/garbage length as an empty string instead of malloc'ing garbage
+    }
     char* s = malloc((size_t)len + 1);
     fread(s, 1, (size_t)len, fp);
     s[len] = '\0';
@@ -366,10 +369,12 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     // bounding box of every placed+rotated model, in vox-space
     int32_t global_min[3] = {INT32_MAX, INT32_MAX, INT32_MAX};
     int32_t global_max[3] = {INT32_MIN, INT32_MIN, INT32_MIN};
+    bool any_valid_placement = false;
     for (int32_t p = 0; p < num_placements; p++) {
         VoxPlacement* placement = &placements[p];
         if (placement->model_id < 0 || placement->model_id >= num_models) { continue; }
         VoxRawModel* model = &models[placement->model_id];
+        any_valid_placement = true;
 
         for (int32_t corner = 0; corner < 8; corner++) {
             int32_t local[3] = {
@@ -387,6 +392,12 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
         }
     }
 
+    if (!any_valid_placement) {
+        printf("vox file has no valid placements: %s\n", path);
+        for (int32_t i = 0; i < num_models; i++) { free(models[i].xyzi); }
+        return structure;
+    }
+
     // this engine is Y-up; remap vox-space (x,y,z) -> local (x,z,y)
     uint32_t dim[3] = {
         (uint32_t)(global_max[0] - global_min[0]),
@@ -397,6 +408,12 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
 
     structure.size = size;
     structure.voxels = calloc(size, sizeof(uint8_t));
+    if (structure.voxels == NULL) {
+        printf("vox file bounding box too large to allocate (%u voxels): %s\n", size, path);
+        structure.size = 0;
+        for (int32_t i = 0; i < num_models; i++) { free(models[i].xyzi); }
+        return structure;
+    }
     memcpy(structure.dimensions, dim, sizeof(structure.dimensions));
 
     for (int32_t p = 0; p < num_placements; p++) {

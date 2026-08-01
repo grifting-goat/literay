@@ -21,7 +21,8 @@
 #define ACCUM_IMAGE_FORMAT    VK_FORMAT_R32G32B32A32_SFLOAT // needs full float precision; accumulated over many frames
 #define WORLD_TEXTURE_FORMAT  VK_FORMAT_R8_UINT // 3D voxel material ids
 #define MAX_MATERIALS         256U // one per possible voxel byte value
-#define MAX_MODELS            16U 
+#define MAX_MODELS            16U
+#define MAX_ENTITIES           16U
 
 
 #define VOXEL_GRID_DIM 512U
@@ -106,7 +107,8 @@ typedef struct {
 
     Vk_Buffer_t entityDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t modelBuffer;
-    
+    Vk_Buffer_t modelVoxelBuffer; // every model's voxel material-ids, back to back; GpuModel.voxelOffset indexes into this
+
 
 } Vk_Objects_t;
 
@@ -131,6 +133,8 @@ void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 void window_world_buffer_load(Window_t* window, World* wrld);
 
 void window_material_buffer_load(Window_t* window, Material* mat_list);
+
+void window_test_entity_upload(Window_t* window);
 
 void window_model_buffer_load(Window_t* window, Model_t* model_list);
 

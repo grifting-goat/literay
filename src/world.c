@@ -339,8 +339,8 @@ void world_generate_structures(World* wrld) {
         }
     }
 
-    //uint32_t mp_origin[3] = {wrld->dimensions[0] / 2, wrld->dimensions[1] * 0.55f, wrld->dimensions[2] / 2};
-    //world_structure_place(wrld, (StructureTypes)MIRROR_PLANE, mp_origin, 2, 0, 1.0f, true); // facing +X, stands it up as a wall
+    uint32_t mp_origin[3] = {wrld->dimensions[0] / 2, wrld->dimensions[1] * 0.55f, wrld->dimensions[2] / 2};
+    world_structure_place(wrld, (StructureTypes)MIRROR_PLANE, mp_origin, 2, 0, 1.0f, true); // facing +X, stands it up as a wall
 
     //uint32_t vp_origin[3] = {wrld->dimensions[0] / 2, wrld->dimensions[1] * 0.55f, wrld->dimensions[2] / 3};
     //world_structure_place(wrld, (StructureTypes)VARNISH_PLANE, vp_origin, 0, 0, 1.0f, true);

@@ -23,12 +23,26 @@ typedef struct {
 } CameraData;
 
 typedef struct {
-    float position[4]; 
-    float rotation[4]; 
-    float scale;
+    float position[4];
+    float rotation[4];
 
+    // conservative world-space AABB (valid under any yaw), precomputed on the CPU
+    // so the shader doesn't redo this math on every CastDynamicRay call
+    float worldMin[4];
+    float worldMax[4];
+
+    float scale;
     uint32_t modelIdx;
+    float _pad0[2]; // rounds struct to 80 bytes, matching the HLSL cbuffer's 16-byte rounding
 } EntityData;
+
+
+typedef struct {
+    uint32_t voxelOffset;
+    uint32_t axes; // byte0 = up_axis, byte1 = cardinal_axis
+    uint32_t dimensions[3];
+    uint32_t size;
+} GpuModel;
 
 typedef struct {
     int _screen_size[2];
