@@ -1,11 +1,15 @@
 #ifndef DISPLAY_H
-#define DISPAY_H
+#define DISPLAY_H
 
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
+
+#include "camera.h"
+#include "world.h"
+#include "model.h"
 
 
 // Configuration constants
@@ -14,10 +18,15 @@
 #define SWAPCHAIN_FORMAT      VK_FORMAT_B8G8R8A8_SRGB
 #define DEPTH_FORMAT          VK_FORMAT_D32_SFLOAT
 #define OUTPUT_IMAGE_FORMAT   VK_FORMAT_R8G8B8A8_UNORM
-#define MAX_MATERIALS          256U // one per possible voxel byte value
+#define ACCUM_IMAGE_FORMAT    VK_FORMAT_R32G32B32A32_SFLOAT // needs full float precision; accumulated over many frames
+#define WORLD_TEXTURE_FORMAT  VK_FORMAT_R8_UINT // 3D voxel material ids
+#define MAX_MATERIALS         256U // one per possible voxel byte value
+#define MAX_MODELS            16U
+#define MAX_ENTITIES           16U
 
 
-#define VOXEL_GRID_DIM 256U
+#define VOXEL_GRID_DIM 512U
+#define VOXEL_MASK_BLOCK_SIZE 8U // match BLOCK_SIZE in shader
 
 
 #include "compute_res.h"
@@ -75,19 +84,31 @@ typedef struct {
     VkCommandPool commandPool;
 
     VkSemaphore timelineSemaphore;
+    VkSemaphore computeTimelineSemaphore; // signaled right after the compute dispatch
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
 	uint32_t frameCounter;
 
     Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
+    Vk_Image_t accumImageRes; // single, persistent across frames
+    uint32_t accumCount;
     VkShaderModule computeShader;
     Pipeline_t computePipeline;
     VkDescriptorSetLayout computeDescriptorSetLayout;
     VkDescriptorPool computeDescriptorPool;
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
 
-    Vk_Buffer_t worldGridBuffer;
+    Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
+    Vk_Buffer_t worldGridMaskBuffer;
+    Vk_Buffer_t worldGridOccBuffer; // 1 bit per voxel, for the fine DDA loop
+
     Vk_Buffer_t cameraDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t materialProperitesBuffer;
+
+
+    Vk_Buffer_t entityDataBuffer[MAX_FRAMES_IN_FLIGHT];
+    Vk_Buffer_t modelBuffer;
+    Vk_Buffer_t modelVoxelBuffer; // every model's voxel material-ids, back to back; GpuModel.voxelOffset indexes into this
+
 
 } Vk_Objects_t;
 
@@ -107,9 +128,15 @@ Window_t window_create();
 
 void window_attach_device(Window_t* window);
 
-void window_render(Window_t* window);
+void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 
-void window_world_buffer_load(Window_t* window);
+void window_world_buffer_load(Window_t* window, World* wrld);
+
+void window_material_buffer_load(Window_t* window, Material* mat_list);
+
+void window_test_entity_upload(Window_t* window);
+
+void window_model_buffer_load(Window_t* window, Model_t* model_list);
 
 void window_close(Window_t* window);
 

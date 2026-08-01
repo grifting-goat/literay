@@ -3,7 +3,7 @@
 This is my sandbox testing enviroment for voxel-based raytracing
 
 <div align="left">
-  <img src="res/nicer_lantern.png" width="128" alt="Description">
+  <img src="res/images/nicer_lantern.png" width="128" alt="Description">
 </div>
 
 ## Technical Goals
@@ -44,3 +44,16 @@ This is my sandbox testing enviroment for voxel-based raytracing
 ## Why
 
 eventually I want to develop a PVP and exploration based SMP game but im writing my own framework in C so this idea is totally unrealistic and will take years
+
+
+## Screenshots
+
+![Ship](res/images/ship.png)
+
+![Player](res/images/cute.png)
+
+
+![Fog](res/images/fog.png)
+
+
+![Water](res/images/water.png)
