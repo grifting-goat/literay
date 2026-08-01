@@ -71,7 +71,7 @@ static const float FLT_INF = asfloat(0x7F800000);
 static const float MAX_RAY_DISTANCE = 400.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
-static const uint MAX_BONUS_BOUNCES = 2;
+static const uint MAX_BONUS_BOUNCES = 3;
 
 static const uint BLOCK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
 

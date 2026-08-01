@@ -45,15 +45,15 @@ This is my sandbox testing enviroment for voxel-based raytracing
 
 eventually I want to develop a PVP and exploration based SMP game but im writing my own framework in C so this idea is totally unrealistic and will take years
 
+the better reason i just wanted to make a raytracer because it seemed cool
+
 
 ## Screenshots
 
-![Ship](res/images/ship.png)
+![Player](res/images/circle.png)
 
-![Player](res/images/cute.png)
-
+![Ship2](res/images/ship2.png)
 
 ![Fog](res/images/fog.png)
-
 
 ![Water](res/images/water.png)
