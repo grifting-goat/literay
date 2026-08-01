@@ -9,6 +9,9 @@ struct Material {
     float smoothness;
     float specularProbability;
     float noise;
+
+    float opaque;
+    float3 _pad0;
 };
 [[vk::binding(2, 0)]] StructuredBuffer<Material> materials;
 

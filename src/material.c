@@ -25,7 +25,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 1.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [GREEN_LIGHT] = {
         .color = {0.0f, 1.0f, 0.0f, 1.0f},
@@ -33,7 +34,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 1.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [BLUE_LIGHT] = {
         .color = {0.0f, 0.0f, 1.0f, 1.0f},
@@ -41,7 +43,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 1.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [MIRROR] = {
         .color = {1.0f, 1.0f, 1.0f, 1.0f},
@@ -49,7 +52,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 1.0f,
         .specularProbability = 1.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [WHITE_LIGHT] = {
         .color = {1.0f, 1.0f, 1.0f, 1.0f},
@@ -57,7 +61,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 10.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [GRASS] = {
         .color = {0.016f, 0.561f, 0.008f, 1.0f},
@@ -65,7 +70,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.4f,
         .specularProbability = 1.0f,
-        .noise = 0.03f
+        .noise = 0.03f,
+        .opaque = 1.0f
     },
     [DIRT] = {
         .color = {0.451f, 0.235f, 0.004f, 1.0f},
@@ -73,7 +79,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.04f
+        .noise = 0.04f,
+        .opaque = 1.0f
     },
     [STONE] = {
         .color = {0.569f, 0.569f, 0.569f, 1.0f},
@@ -81,7 +88,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.04f
+        .noise = 0.04f,
+        .opaque = 1.0f
     },
     [YELLOW_LIGHT] = {
         .color = {1.0f, 1.0f, 0.0f, 1.0f},
@@ -89,7 +97,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 10.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [BLACK] = {
         .color = {0.0f, 0.0f, 0.0f, 1.0f},
@@ -97,7 +106,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [BLACK_VARNISH] = {
         .color = {0.05f, 0.05f, 0.05f, 1.0f},
@@ -105,7 +115,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.9f,
         .specularProbability = 0.9f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [PURPLE] = {
         .color = {1.0f, 0.00f, 1.0f, 1.0f},
@@ -113,7 +124,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.0f
+        .noise = 0.0f,
+        .opaque = 1.0f
     },
     [WATER] = {
         .color = {0.424f, 0.761f, 0.89f, 1.0f},
@@ -121,7 +133,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 1.0f,
         .specularProbability = 0.9f,
-        .noise = 0.02f
+        .noise = 0.02f,
+        .opaque = 1.0f
     },
     [SAND] = {
         .color = {0.929f, 0.855f, 0.11f, 1.0f},
@@ -129,7 +142,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.0f,
         .specularProbability = 0.0f,
-        .noise = 0.1f
+        .noise = 0.1f,
+        .opaque = 1.0f
     },
     [MARBLE] = {
         .color = {0.90f, 0.90f, 0.90f, 1.0f},
@@ -137,7 +151,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.98f,
         .specularProbability = 0.07f,
-        .noise = 0.05f
+        .noise = 0.05f,
+        .opaque = 1.0f
     },
     [COPPER] = {
         .color = {0.722f, 0.451f, 0.2f, 1.0f},
@@ -145,7 +160,8 @@ Material material_list[0xFF] = {
         .emissionStrength = 0.0f,
         .smoothness = 0.7f,
         .specularProbability = 0.9f,
-        .noise = 0.02f
+        .noise = 0.02f,
+        .opaque = 1.0f
     },
     [RUBY] = {
         .color = {0.929f, 0.235f, 0.149f, 1.0f},
@@ -153,7 +169,17 @@ Material material_list[0xFF] = {
         .emissionStrength = 1.0f,
         .smoothness = 0.8f,
         .specularProbability = 0.9f,
-        .noise = 0.05f
+        .noise = 0.05f,
+        .opaque = 1.0f
+    },
+    [GLASS] = {
+        .color = {1.0f, 0.0f, 0.0f, 1.0f},
+        .emissionColor = {1.0f, 1.0f, 1.0f, 1.0f},
+        .emissionStrength = 0.0f,
+        .smoothness = 0.2f,
+        .specularProbability = 0.05f,
+        .noise = 0.05f,
+        .opaque = 0.1f
     },
 };
 
@@ -181,6 +207,7 @@ void material_palette_create() {
         m.smoothness = 0.0f;
         m.specularProbability = 0.0f;
         m.noise = 0.01f;
+        m.opaque = 1.0f;
 
         material_list[i] = m;
     }

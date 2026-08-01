@@ -10,6 +10,9 @@ typedef struct {
     float smoothness;
     float specularProbability;
     float noise;
+
+    float opaque;
+    float _pad0[3];
 } Material;
 
 typedef struct {

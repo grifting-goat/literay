@@ -24,6 +24,7 @@ typedef enum {
     MARBLE,
     COPPER,
     RUBY,
+    GLASS,
     PALETTE_MATERIAL_BASE,
     MATERIAL_COUNT = MAX_MATERIAL_COUNT
 
