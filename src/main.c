@@ -26,7 +26,7 @@
 
 int main() {
 
-    Vector_t spawn = vector_create((CHUNK_DIM / 2), (CHUNK_DIM / 2) + 10.0f, (CHUNK_DIM / 2));
+    Vector_t spawn = vector_create((CHUNK_DIM), (CHUNK_DIM) + 100.0f, (CHUNK_DIM));
     Vector_t inital_angle = {0.0f};
 
     Window_t window = window_create();
@@ -45,7 +45,7 @@ int main() {
 	
 
 	window_material_buffer_load(&window, material_list);
-	window_model_buffer_load(&window, model_instance_list);
+	//window_model_buffer_load(&window, model_instance_list);
 
     glfwSetInputMode(window.glfw_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 	double lastMouseX = 0.0, lastMouseY = 0.0;
@@ -63,6 +63,8 @@ int main() {
 	const double fpsUpdateInterval = 0.2; // 5 Hz
 
 	Vector_t sun_direction = vector_create(0.318f, 0.848f, 0.424f);
+
+	world_chunk_memory_queue(&wrld, &cam.pos);
 
     while (!window_should_close(&window)) {
         window_poll_events(&window);
@@ -101,6 +103,16 @@ int main() {
 		cam.angle.z = roll;
 
         camera_position_controller(&window, &cam, frameTime);
+
+		if (floor(cam.pos.x / CHUNK_DIM) != floor(cam.prevPos.x / CHUNK_DIM)
+			|| floor(cam.pos.y / CHUNK_DIM) != floor(cam.prevPos.y / CHUNK_DIM)
+			|| floor(cam.pos.z / CHUNK_DIM) != floor(cam.prevPos.z / CHUNK_DIM)
+		) {
+			world_chunk_memory_queue(&wrld, &cam.pos);
+		}
+
+		window_world_chunk_streaming(&window, &wrld);
+		
 
         window_render(&window, &cam, sun_direction);
 

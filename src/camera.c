@@ -51,12 +51,12 @@ void camera_position_controller(Window_t* window, Camera* cam, float frameTime) 
 	float rightX = -cosf(yaw);
 	float rightZ = -sinf(yaw);
 
-	float moveSpeed = 15.0f;
+	float moveSpeed = 20.0f;
 
 	float moveX = 0.0f;
 	float moveZ = 0.0f;
 
-	if (glfwGetKey(window->glfw_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) { moveSpeed = 35.0f; }
+	if (glfwGetKey(window->glfw_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS) { moveSpeed = 65.0f; }
 
 	if (glfwGetKey(window->glfw_window, GLFW_KEY_W) == GLFW_PRESS) { moveX += forwardX; moveZ += forwardZ; }
 	if (glfwGetKey(window->glfw_window, GLFW_KEY_S) == GLFW_PRESS) { moveX -= forwardX; moveZ -= forwardZ; }

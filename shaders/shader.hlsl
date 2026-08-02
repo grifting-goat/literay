@@ -1,6 +1,7 @@
 [[vk::binding(1, 0)]] Texture3D<uint> brickAtlasIn; //atlas-packed BRICK_SIZE^3 bricks
 [[vk::binding(6, 0)]] Texture3D<uint> brickIndirectionIn; // brick coord
-[[vk::binding(7, 0)]] Texture3D<uint> voxelOccupancyIn; 
+[[vk::binding(7, 0)]] Texture3D<uint> voxelOccupancyIn;
+[[vk::binding(11, 0)]] Texture3D<uint> chunkSkipIn; // nonzero if that chunk has any geometry at all
 
 struct Material {
     float4 color;
@@ -71,14 +72,27 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 400.0f;
+static const float MAX_RAY_DISTANCE = 512.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 static const uint MAX_BONUS_BOUNCES = 3;
 
-static const uint BRICK_SIZE = 8; // must match VOXEL_MASK_BLOCK_SIZE in display.h
+static const uint BRICK_SIZE = 8;
 static const uint BRICK_SIZE_SHIFT = 3; // log2(BRICK_SIZE)
-static const uint EMPTY_SLOT = 0xFFFFFFFFu; // must match EMPTY_SLOT in display.h
+static const uint EMPTY_SLOT = 0xFFFFFFFFu;
+
+static const uint CHUNK_DIM = 32;
+static const uint CHUNK_DIM_SHIFT = 5; // log2(CHUNK_DIM)
+static const uint BRICKS_PER_CHUNK_AXIS = 4; // CHUNK_DIM / BRICK_SIZE
+
+static const int CHUNK_STREAM_WINDOW_VOXELS = 1024; // CHUNK_STREAM_WINDOW * CHUNK_DIM
+static const int CHUNK_STREAM_WINDOW_BRICKS = 128;  // CHUNK_STREAM_WINDOW_VOXELS / BRICK_SIZE
+static const int CHUNK_STREAM_WINDOW_CHUNKS = CHUNK_STREAM_WINDOW_BRICKS / BRICKS_PER_CHUNK_AXIS; // derived, not a separate synced constant
+
+int3 WrapCoord3(int3 v, int n) {
+    int3 m = v % n;
+    return select(m < 0, m + n, m);
+}
 
 static const bool EnvironmentEnabled = true;
 static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
@@ -153,8 +167,15 @@ Ray CreateCameraRay(float x, float y) {
 }
 
 
+// coarsest skip: does this chunk have any geometry at all
+bool ChunkHasGeometry(int3 chunkCell) {
+    int3 texCell = WrapCoord3(chunkCell, CHUNK_STREAM_WINDOW_CHUNKS);
+    return chunkSkipIn.Load(int4(texCell, 0)) != 0;
+}
+
 uint ReadBrickSlot(int3 brickCell) {
-    return brickIndirectionIn.Load(int4(brickCell, 0));
+    int3 texCell = WrapCoord3(brickCell, CHUNK_STREAM_WINDOW_BRICKS);
+    return brickIndirectionIn.Load(int4(texCell, 0));
 }
 
 int3 DecodeAtlasSlot(uint slot) {
@@ -166,8 +187,9 @@ int3 DecodeAtlasSlot(uint slot) {
 
 // occupancy bit, addressed by world voxel coord
 bool IsVoxelSolid(int3 worldCell) {
-    uint word = voxelOccupancyIn.Load(int4(worldCell.x >> 5, worldCell.y, worldCell.z, 0));
-    uint bit = uint(worldCell.x) & 31u;
+    int3 texCell = WrapCoord3(worldCell, CHUNK_STREAM_WINDOW_VOXELS);
+    uint word = voxelOccupancyIn.Load(int4(texCell.x >> 5, texCell.y, texCell.z, 0));
+    uint bit = uint(texCell.x) & 31u;
     return ((word >> bit) & 1u) != 0u;
 }
 
@@ -233,69 +255,87 @@ Hit CastStaticRay(Ray ray) {
     hit.isEntity = false;
 
     int3 cell = int3(floor(ray.origin));
-    if (any(cell < 0) || any(cell >= pc._voxel_grid_size)) {
-        return hit;
-    }
 
     int3 istep = int3(sign(ray.direction));
     float3 invDir = ray.invDir;
     float3 tDelta = abs(invDir);
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
-    float3 tFarPerAxis = max(-ray.origin * invDir, (float3(pc._voxel_grid_size) - ray.origin) * invDir);
-    float tExit = min(min(tFarPerAxis.x, tFarPerAxis.y), min(tFarPerAxis.z, MAX_RAY_DISTANCE)) - 0.01f;
+    // no fixed world boundary anymore -- GPU addressing wraps (WrapCoord3), so the only real limit is travel distance
+    float tExit = MAX_RAY_DISTANCE - 0.01f;
 
-    int3 brickGridSize = pc._voxel_grid_size >> int(BRICK_SIZE_SHIFT);
-
-    int3 brickCell = cell >> int(BRICK_SIZE_SHIFT);
-    float3 brickNextBoundary = float3(brickCell) * BRICK_SIZE + stepSign * BRICK_SIZE;
-    float3 brickTMax = select(ray.direction != 0.0f, (brickNextBoundary - ray.origin) * invDir, FLT_INF);
-    float3 brickTDelta = tDelta * BRICK_SIZE;
-    float brickTCurrent = 0.0f;
+    // level 1: chunk-granularity skip -- avoids ever touching brick indirection for empty/unloaded chunks
+    int3 chunkCell = cell >> int(CHUNK_DIM_SHIFT);
+    float3 chunkNextBoundary = float3(chunkCell) * CHUNK_DIM + stepSign * CHUNK_DIM;
+    float3 chunkTMax = select(ray.direction != 0.0f, (chunkNextBoundary - ray.origin) * invDir, FLT_INF);
+    float3 chunkTDelta = tDelta * CHUNK_DIM;
+    float chunkTCurrent = 0.0f;
     float3 normal = float3(0.0f, 0.0f, 0.0f);
 
-    while (brickTCurrent < tExit) {
+    while (chunkTCurrent < tExit) {
 
-        uint slot = ReadBrickSlot(brickCell);
-        if (slot != EMPTY_SLOT) {
-            int3 atlasOrigin = DecodeAtlasSlot(slot);
+        if (ChunkHasGeometry(chunkCell)) {
 
-            float3 pos = ray.origin + ray.direction * (brickTCurrent + 0.01f);
-            int3 brickMin = brickCell << int(BRICK_SIZE_SHIFT);
-            int3 fineCell = clamp(int3(floor(pos)), brickMin, brickMin + int(BRICK_SIZE) - 1);
+            // level 2: brick-granularity skip within this chunk
+            float3 chunkPos = ray.origin + ray.direction * (chunkTCurrent + 0.01f);
+            int3 chunkMin = chunkCell << int(CHUNK_DIM_SHIFT);
+            int3 brickCell = clamp(int3(floor(chunkPos)), chunkMin, chunkMin + int(CHUNK_DIM) - 1) >> int(BRICK_SIZE_SHIFT);
 
-            float tCurrent = brickTCurrent;
-            float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
+            float brickTCurrent = chunkTCurrent;
+            float3 brickNextBoundary = float3(brickCell) * BRICK_SIZE + stepSign * BRICK_SIZE;
+            float3 brickTMax = select(ray.direction != 0.0f, (brickNextBoundary - ray.origin) * invDir, FLT_INF);
+            float3 brickTDelta = tDelta * BRICK_SIZE;
 
-            float brickBoundary = min(min(brickTMax.x, brickTMax.y), brickTMax.z) + 0.01f;
-            float brickExit = min(brickBoundary, tExit);
+            float chunkBoundary = min(min(chunkTMax.x, chunkTMax.y), chunkTMax.z) + 0.01f;
+            float chunkExit = min(chunkBoundary, tExit);
 
-            while (tCurrent < brickExit) {
-                if (IsVoxelSolid(fineCell)) {
-                    hit.mat_type = ReadAtlasVoxel(atlasOrigin + (fineCell - brickMin));
-                    hit.dist = tCurrent;
-                    hit.normal = normal;
-                    hit.end = ray.origin + ray.direction * tCurrent;
-                    return hit;
+            while (brickTCurrent < chunkExit) {
+
+                uint slot = ReadBrickSlot(brickCell);
+                if (slot != EMPTY_SLOT) {
+                    int3 atlasOrigin = DecodeAtlasSlot(slot);
+
+                    float3 pos = ray.origin + ray.direction * (brickTCurrent + 0.01f);
+                    int3 brickMin = brickCell << int(BRICK_SIZE_SHIFT);
+                    int3 fineCell = clamp(int3(floor(pos)), brickMin, brickMin + int(BRICK_SIZE) - 1);
+
+                    float tCurrent = brickTCurrent;
+                    float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
+
+                    float brickBoundary = min(min(brickTMax.x, brickTMax.y), brickTMax.z) + 0.01f;
+                    float brickExit = min(brickBoundary, chunkExit);
+
+                    while (tCurrent < brickExit) {
+                        if (IsVoxelSolid(fineCell)) {
+                            hit.mat_type = ReadAtlasVoxel(atlasOrigin + (fineCell - brickMin));
+                            hit.dist = tCurrent;
+                            hit.normal = normal;
+                            hit.end = ray.origin + ray.direction * tCurrent;
+                            return hit;
+                        }
+
+                        float3 mask = DDAStepMask(tMax);
+                        tCurrent = dot(mask, tMax);
+                        tMax += mask * tDelta;
+                        normal = -mask * float3(istep);
+                        fineCell += int3(mask) * istep;
+                    }
                 }
 
-                float3 mask = DDAStepMask(tMax);
-                tCurrent = dot(mask, tMax);
-                tMax += mask * tDelta;
-                normal = -mask * float3(istep);
-                fineCell += int3(mask) * istep;
+                float3 brickMask = DDAStepMask(brickTMax);
+                brickTCurrent = dot(brickMask, brickTMax);
+                brickTMax += brickMask * brickTDelta;
+                normal = -brickMask * float3(istep);
+                brickCell += int3(brickMask) * istep;
             }
         }
 
-        float3 brickMask = DDAStepMask(brickTMax);
-        brickTCurrent = dot(brickMask, brickTMax);
-        brickTMax += brickMask * brickTDelta;
-        normal = -brickMask * float3(istep);
+        float3 chunkMask = DDAStepMask(chunkTMax);
+        chunkTCurrent = dot(chunkMask, chunkTMax);
+        chunkTMax += chunkMask * chunkTDelta;
+        normal = -chunkMask * float3(istep);
 
-        brickCell += int3(brickMask) * istep;
-        if (any(brickCell < 0) || any(brickCell >= brickGridSize)) {
-            break;
-        }
+        chunkCell += int3(chunkMask) * istep;
     }
     return hit;
 }

@@ -9,6 +9,41 @@
 
 #include "stb_ds.h"
 
+//move these elsewhere later
+#define CHUNK_STREAM_RADIUS CHUNK_COORD_LIMIT
+#define CHUNK_STREAM_DIAMETER (CHUNK_STREAM_RADIUS * 2)
+#define CHUNK_STREAM_COUNT (CHUNK_STREAM_DIAMETER * CHUNK_STREAM_DIAMETER * CHUNK_STREAM_DIAMETER)
+
+typedef struct {
+    int32_t dx, dy, dz;
+    int32_t dist_sq;
+} ChunkOffset;
+
+static int chunk_offset_cmp(const void* a, const void* b) {
+    int32_t da = ((const ChunkOffset*)a)->dist_sq;
+    int32_t db = ((const ChunkOffset*)b)->dist_sq;
+    return (da > db) - (da < db);
+}
+
+static ChunkOffset chunk_stream_offsets[CHUNK_STREAM_COUNT];
+static bool chunk_stream_offsets_ready = false;
+
+static void chunk_stream_offsets_load(void) {
+    if (chunk_stream_offsets_ready) {return;}
+
+    int i = 0;
+    for (int32_t dz = -CHUNK_STREAM_RADIUS; dz < CHUNK_STREAM_RADIUS; dz++) {
+        for (int32_t dy = -CHUNK_STREAM_RADIUS; dy < CHUNK_STREAM_RADIUS; dy++) {
+            for (int32_t dx = -CHUNK_STREAM_RADIUS; dx < CHUNK_STREAM_RADIUS; dx++) {
+                chunk_stream_offsets[i++] = (ChunkOffset){dx, dy, dz, dx*dx + dy*dy + dz*dz};
+            }
+        }
+    }
+
+    qsort(chunk_stream_offsets, CHUNK_STREAM_COUNT, sizeof(ChunkOffset), chunk_offset_cmp);
+    chunk_stream_offsets_ready = true;
+}
+
 
 
 //Claude made these for me
@@ -23,7 +58,7 @@ static double perlin_grad(int hash, double x, double y) {
 
 //void generate_terrain_heightmap(World* wrld);
 
-Chunk chunk_create(World* wrld, uVector_t coord);
+Chunk chunk_create(World* wrld, iVector_t coord);
 void chunk_generate_brick_map(Chunk* chunk);
 void chunk_generate_occupancy_mask(Chunk* chunk);
 void chunk_free(Chunk* chunk);
@@ -32,20 +67,25 @@ void chunk_free(Chunk* chunk);
 
 World world_create(uint32_t seed) {
 
-    World wrld;
+    chunk_stream_offsets_load(); //temp
+
+    World wrld = {0};
     PerlinParams pp = {
-        .amplitude = CHUNK_DIM,
-        .scale = 0.005f,
+        .amplitude = 100.0f,
+        .scale = 0.001f,
         .octaves = 6,
-        .sea_level = CHUNK_DIM / 2
+        .sea_level = 50.0f
     };
+
+    wrld.chunk_load_queue = q_create(MAX_QUEUE_SIZE);
+    wrld.chunk_rmf_queue = q_create(MAX_QUEUE_SIZE);
 
     wrld.perlin_params = pp;
 
     wrld.seed = seed;
 
     wrld.chunk_map = NULL;
-
+    wrld.pending_map = NULL;
 
     return wrld;
 }
@@ -53,16 +93,18 @@ World world_create(uint32_t seed) {
 
 void world_load_spawn_chunk(World* wrld) {
 
-    for (int x = 0; x < 16; x++) {
-        for (int y = 0; y < 16; y++) {
-            uVector_t coord = uVector_create(x, 0, y);
-            Chunk chunk = chunk_create(wrld, coord);
-            
+    for (int x = -7; x < 8; x++) {
+        for (int y = -7; y < 8; y++) {
+            for (int z = -7; z < 8; z++) {
+                iVector_t coord = iVector_create(x, y, z);
+                Chunk chunk = chunk_create(wrld, coord);
+                
 
-            chunk_generate_brick_map(&chunk);
-            chunk_generate_occupancy_mask(&chunk);
+                chunk_generate_brick_map(&chunk);
+                chunk_generate_occupancy_mask(&chunk);
 
-            hmput(wrld->chunk_map, chunk.coord, chunk);
+                hmput(wrld->chunk_map, chunk.coord, chunk);
+            }
         }
     }
 
@@ -130,6 +172,113 @@ void chunk_generate_occupancy_mask(Chunk* chunk) {
 
 }
 
+int world_chunk_load(World* wrld, iVector_t chunkCoords) {
+    Chunk chunk = chunk_create(wrld, chunkCoords);
+    chunk_generate_brick_map(&chunk);
+    chunk_generate_occupancy_mask(&chunk);
+    hmput(wrld->chunk_map, chunk.coord, chunk);
+    return hmgeti(wrld->chunk_map, chunkCoords);
+}
+
+void world_chunk_memory_queue(World* wrld, Vector_t* cameraPos) {
+
+    iVector_t chunk_coord = iVector_create((int32_t)floor(cameraPos->x / CHUNK_DIM), (int32_t)floor(cameraPos->y / CHUNK_DIM), (int32_t)floor(cameraPos->z / CHUNK_DIM));
+
+    for (int i = 0; i < CHUNK_STREAM_COUNT; i++) {
+        ChunkOffset off = chunk_stream_offsets[i];
+        iVector_t test_coord = iVector_create(chunk_coord.x + off.dx, chunk_coord.y + off.dy, chunk_coord.z + off.dz);
+
+        int idx = hmgeti(wrld->chunk_map, test_coord);
+        if (idx == -1 && hmgeti(wrld->pending_map, test_coord) == -1) {
+            q_enque(&wrld->chunk_load_queue, &test_coord);
+            hmput(wrld->pending_map, test_coord, true);
+        }
+
+    }
+
+    iVector_t cam_coord = chunk_coord;
+    for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
+        iVector_t test_coord = wrld->chunk_map[i].key;
+        int32_t dx = test_coord.x - cam_coord.x;
+        int32_t dy = test_coord.y - cam_coord.y;
+        int32_t dz = test_coord.z - cam_coord.z;
+
+        if ((dx < -CHUNK_STREAM_RADIUS || dx >= CHUNK_STREAM_RADIUS ||
+            dy < -CHUNK_STREAM_RADIUS || dy >= CHUNK_STREAM_RADIUS ||
+            dz < -CHUNK_STREAM_RADIUS || dz >= CHUNK_STREAM_RADIUS) &&
+            hmgeti(wrld->pending_map, test_coord) == -1) {
+            q_enque(&wrld->chunk_rmf_queue, &test_coord);
+            hmput(wrld->pending_map, test_coord, true);
+        }
+    }
+
+}
+
+
+//returns the chunk_map index or -1
+int world_chunk_test(World* wrld, Vector_t* cameraPos) {
+
+    iVector_t chunk_coord = iVector_create((int32_t)floor(cameraPos->x / CHUNK_DIM), 0, (int32_t)floor(cameraPos->z / CHUNK_DIM));
+    chunk_stream_offsets_load();
+
+    for (int i = 0; i < CHUNK_STREAM_COUNT; i++) {
+        ChunkOffset off = chunk_stream_offsets[i];
+        iVector_t test_coord = iVector_create(chunk_coord.x + off.dx, chunk_coord.y + off.dy, chunk_coord.z + off.dz);
+
+        int idx = hmgeti(wrld->chunk_map, test_coord);
+        if (idx == -1) {
+            Chunk chunk = chunk_create(wrld, test_coord);
+            chunk_generate_brick_map(&chunk);
+            chunk_generate_occupancy_mask(&chunk);
+            hmput(wrld->chunk_map, chunk.coord, chunk);
+            idx = hmgeti(wrld->chunk_map, test_coord);
+            return idx;
+        }
+    }
+    return -1;
+
+}
+
+
+
+//returns the chunk_map index of a loaded chunk now outside the streaming box, or -1
+int world_chunk_untest(World* wrld, Vector_t* cameraPos) {
+
+    iVector_t cam_coord = iVector_create((int32_t)floor(cameraPos->x / CHUNK_DIM), 0, (int32_t)floor(cameraPos->z / CHUNK_DIM));
+
+    for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
+        iVector_t chunk_coord = wrld->chunk_map[i].key;
+        int32_t dx = chunk_coord.x - cam_coord.x;
+        int32_t dz = chunk_coord.z - cam_coord.z;
+
+        if (dx < -CHUNK_STREAM_RADIUS || dx >= CHUNK_STREAM_RADIUS ||
+            dz < -CHUNK_STREAM_RADIUS || dz >= CHUNK_STREAM_RADIUS) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int world_chunk_find_collision(World* wrld, iVector_t coord, int excludeIdx) {
+    for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
+        if (i == excludeIdx) { continue; }
+        iVector_t c = wrld->chunk_map[i].key;
+        if (c.y != coord.y) { continue; }
+        if ((c.x - coord.x) % CHUNK_STREAM_WINDOW == 0 && (c.z - coord.z) % CHUNK_STREAM_WINDOW == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+void world_chunk_unload_by_index(World* wrld, int idx) {
+    if (idx < 0 || idx >= hmlen(wrld->chunk_map)) { return; }
+    iVector_t coord = wrld->chunk_map[idx].key;
+    chunk_free(&wrld->chunk_map[idx].value);
+    hmdel(wrld->chunk_map, coord);
+}
+
 
 void chunk_free(Chunk* chunk) {
     free(chunk->voxelMask); 
@@ -141,13 +290,15 @@ void chunk_free(Chunk* chunk) {
     chunk->loaded = false;
 }
 
-Chunk chunk_create(World* wrld, uVector_t coord) {
+Chunk chunk_create(World* wrld, iVector_t coord) {
 
     Chunk chunk = {0};
     chunk.coord = coord;
     chunk.voxels = calloc(CHUNK_SIZE, sizeof(uint8_t));
 
 	uint8_t dimX = CHUNK_DIM, dimY = CHUNK_DIM, dimZ = CHUNK_DIM;
+
+    uint32_t hieght_limit = 0xFF;
 
 	int perm[256];
 	for (int i = 0; i < 256; i++) {perm[i] = i;}
@@ -163,11 +314,13 @@ Chunk chunk_create(World* wrld, uVector_t coord) {
 	double amplitude = wrld->perlin_params.amplitude;
 	int octaves = wrld->perlin_params.octaves;
 
+	int chunkBaseY = coord.y * (int32_t)dimY; // world Y of this chunk's local y=0
+
 	for (uint32_t z = 0; z < dimZ; z++) {
 		for (uint32_t x = 0; x < dimX; x++) {
 
-			double nx = (double)(coord.x * CHUNK_DIM + x) * baseScale;
-			double nz = (double)(coord.z * CHUNK_DIM + z) * baseScale;
+			double nx = ((double)coord.x * CHUNK_DIM + (double)x) * baseScale;
+			double nz = ((double)coord.z * CHUNK_DIM + (double)z) * baseScale;
 
 			double total = 0.0;
 			double freq = 1.0;
@@ -205,24 +358,37 @@ Chunk chunk_create(World* wrld, uVector_t coord) {
 			}
 
 			double noiseValue = total / maxAmp;
-			int height = (int)((double)(dimY / 2) + noiseValue * amplitude);
-			if (height < 1) { height = 1; }
-			if (height >= (int)dimY) { height = (int)dimY - 1; }
+			int total_height = (int)((double)wrld->perlin_params.sea_level + noiseValue * amplitude);
+			if (total_height < 1) { total_height = 1; }
+			if (total_height >= (int)hieght_limit) { total_height = (int)hieght_limit - 1; }
+
+            int localHeightRaw = total_height - chunkBaseY; 
+
+            int height = localHeightRaw;
+            if (height < 0) { height = 0; }
+            if (height > dimY) { height = dimY; }
 
 			for (int y = 0; y < height; y++) {
 				uint32_t idx = x + (uint32_t)y * dimX + z * dimX * dimY;
 				chunk.voxels[idx] = DIRT; // brown, fills down to the bottom of the grid
 			}
 
-            if ((uint32_t)height < wrld->perlin_params.sea_level) {
-                for (uint32_t y = height; y < wrld->perlin_params.sea_level; y++) {
-                    uint32_t idx = x + y * dimX + z * dimX * dimY;
+            int localSeaLevel = (int)wrld->perlin_params.sea_level - chunkBaseY;
+            if (localSeaLevel < 0) { localSeaLevel = 0; }
+            if (localSeaLevel > dimY) { localSeaLevel = dimY; }
+
+            if (height < localSeaLevel) {
+                for (int y = height; y < localSeaLevel; y++) {
+                    uint32_t idx = x + (uint32_t)y * dimX + z * dimX * dimY;
                     chunk.voxels[idx] = WATER;
                 }
             }
+            if (localHeightRaw >= 0 && localHeightRaw < dimY) {
+                uint32_t topIdx = x + (uint32_t)height * dimX + z * dimX * dimY;
+			    chunk.voxels[topIdx] = (uint32_t)total_height > wrld->perlin_params.sea_level ? GRASS : SAND; // green, top block of the column
 
-			uint32_t topIdx = x + (uint32_t)height * dimX + z * dimX * dimY;
-			chunk.voxels[topIdx] = (uint32_t)height > wrld->perlin_params.sea_level ? GRASS : SAND; // green, top block of the column
+            }
+
 		}
 	}
 
@@ -236,6 +402,12 @@ void world_destroy(World* wrld) {
     }
     hmfree(wrld->chunk_map);
     wrld->chunk_map = NULL;
+
+    hmfree(wrld->pending_map);
+    wrld->pending_map = NULL;
+
+    q_unalloc(&wrld->chunk_load_queue);
+    q_unalloc(&wrld->chunk_rmf_queue);
 }
 
 

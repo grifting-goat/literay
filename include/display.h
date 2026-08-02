@@ -25,7 +25,7 @@
 #define MAX_ENTITIES           16U
 
 
-#define MAX_LOADED_VOXEL_DIM 512U // max voxels resident at once -> per axis
+#define MAX_LOADED_VOXEL_DIM 1024U // max voxels at once -> per axis
 #define VOXEL_BRICK_SIZE 8U // match BRICK_SIZE in shader
 
 #define EMPTY_SLOT 0xFFFFFFFFu
@@ -102,9 +102,7 @@ typedef struct {
     Vk_Image_t brickAtlasTexture; //voxel data
     Vk_Image_t brickIndirectionTexture; //brick location in atlas //world shaped
     Vk_Image_t voxelOccupancyTexture; //is a voxel occupied //organized by chunk
-
-
-    //Vk_Image_t chunkOccupancyTexture; //does a chunk have a voxel
+    Vk_Image_t chunkSkipTexture; //does a chunk have any geometry at all -- coarsest DDA skip
 
     //Vk_Image_t worldVoxelTexture; // 3D R8_UINT -> keeps 3D-adjacent voxels cache-adjacent
     //Vk_Buffer_t worldGridMaskBuffer;
@@ -142,6 +140,8 @@ void window_attach_device(Window_t* window);
 void window_render(Window_t* window, Camera* cam, Vector_t sun_direction);
 
 void window_world_spawn_load(Window_t* window, World* wrld);
+
+void window_world_chunk_streaming(Window_t* window, World* wrld);
 
 void window_material_buffer_load(Window_t* window, Material* mat_list);
 
