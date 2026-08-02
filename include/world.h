@@ -13,6 +13,7 @@
 #define CHUNK_SIZE CHUNK_DIM * CHUNK_DIM * CHUNK_DIM
 
 #define CHUNK_COORD_LIMIT 16
+#define CHUNK_STREAM_RADIUS CHUNK_COORD_LIMIT
 #define CHUNK_STREAM_WINDOW (2 * CHUNK_COORD_LIMIT) // GPU addressing wraps every this-many chunks, per axis
 
 #define CHUNK_QUEUE_SIZE 32
@@ -67,12 +68,6 @@ typedef struct {
 } ChunkMapEntry;
 
 typedef struct {
-    iVector_t key;
-    bool value;
-} PendingMapEntry; // set of coords already sitting in chunk_load_queue or chunk_rmf_queue
-
-
-typedef struct {
 
     double scale;
 	double amplitude;
@@ -86,7 +81,6 @@ typedef struct {
     uint32_t seed;
     PerlinParams perlin_params;
     ChunkMapEntry* chunk_map;
-    PendingMapEntry* pending_map;
 
     Queue_t chunk_load_queue;
     Queue_t chunk_rmf_queue;

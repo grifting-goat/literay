@@ -19,6 +19,17 @@ static int32_t wrapChunkCoord(int32_t v) {
 	return m < 0 ? m + CHUNK_STREAM_WINDOW : m;
 }
 
+// slot ownership tag: the shader compares this against the chunk coord it is traversing,
+// so a slot whose owner doesn't match reads as air regardless of load/unload timing.
+// 10 bits per axis -> false match needs coords 1024 chunks apart landing in the same slot
+static uint32_t packChunkOwner(iVector_t coord, bool hasGeometry) {
+	return ((uint32_t)coord.x & 0x3FFu)
+		| (((uint32_t)coord.y & 0x3FFu) << 10)
+		| (((uint32_t)coord.z & 0x3FFu) << 20)
+		| (hasGeometry ? (1u << 30) : 0u)
+		| (1u << 31);
+}
+
 
 void appInfoCreate(Window_t* window);
 void vulkanInstanceCreate(Window_t* window);
@@ -130,6 +141,20 @@ void window_camera_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 
 	ubo->tan_fov_v = tanf(c->fov_v);
 	ubo->tan_fov_h = tanf(c->fov_h);
+
+	int32_t ccx = (int32_t)floorf(c->pos.x / CHUNK_DIM);
+	int32_t ccy = (int32_t)floorf(c->pos.y / CHUNK_DIM);
+	int32_t ccz = (int32_t)floorf(c->pos.z / CHUNK_DIM);
+
+	ubo->stream_box_min[0] = (float)((ccx - CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_min[1] = (float)((ccy - CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_min[2] = (float)((ccz - CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_min[3] = 0.0f;
+
+	ubo->stream_box_max[0] = (float)((ccx + CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_max[1] = (float)((ccy + CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_max[2] = (float)((ccz + CHUNK_STREAM_RADIUS) * CHUNK_DIM);
+	ubo->stream_box_max[3] = 0.0f;
 }
 
 void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res_index) {
@@ -1413,10 +1438,10 @@ void createBrickTextures(Window_t* window) {
 		MAX_LOADED_VOXEL_DIM / 32, MAX_LOADED_VOXEL_DIM, MAX_LOADED_VOXEL_DIM,
 		VK_FORMAT_R32_UINT, "voxel occupancy texture");
 
-	// coarsest skip: 1 texel per chunk, nonzero if that chunk has any geometry at all
+	// coarsest skip: 1 texel per chunk, packed owner coord + geometry bit (0 = nothing loaded)
 	createVoxelTexture3D(window, &window->vk_objects.chunkSkipTexture,
 		CHUNK_STREAM_WINDOW, CHUNK_STREAM_WINDOW, CHUNK_STREAM_WINDOW,
-		WORLD_TEXTURE_FORMAT, "chunk skip texture");
+		VK_FORMAT_R32_UINT, "chunk skip texture");
 }
 
 void createComputeBuffers(Window_t* window) {
@@ -1706,10 +1731,8 @@ void window_world_atlas_upload(Window_t* window, World* wrld) {
 			writeIdx++;
 		}
 
-		// this chunk definitely has geometry (solidCount == 0 already skipped above), so the
-		// coarsest skip texture always gets a 1 here -- single texel, chunk-granularity coordinate
-		Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, sizeof(uint8_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-		*(uint8_t*)skip_staging.mapped = 1;
+		Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+		*(uint32_t*)skip_staging.mapped = packChunkOwner(coord, true);
 
 		VkBufferImageCopy skip_region = {0};
 		skip_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1953,10 +1976,10 @@ void window_world_chunk_atlas_upload(Window_t* window, World* wrld, Chunk** chun
 	uint32_t* slot_dst = (uint32_t*)slot_staging.mapped;
 	VkBufferImageCopy* indirection_regions = malloc(sizeof(VkBufferImageCopy) * totalBrickSlots);
 
-	// same reasoning for the skip flag: every chunk in the batch writes it, even air ones,
-	// so an air chunk correctly overwrites a previously-solid chunk at the same wrapped slot.
-	Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, (VkDeviceSize)count, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-	uint8_t* skip_dst = (uint8_t*)skip_staging.mapped;
+	// every chunk in the batch claims its slot, even air ones, so a loaded air chunk
+	// correctly overwrites whichever chunk previously owned the same wrapped slot
+	Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, (VkDeviceSize)count * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	uint32_t* skip_dst = (uint32_t*)skip_staging.mapped;
 	VkBufferImageCopy* skip_regions = malloc(sizeof(VkBufferImageCopy) * count);
 
 	Vk_Buffer_t voxel_staging = {0};
@@ -2032,10 +2055,10 @@ void window_world_chunk_atlas_upload(Window_t* window, World* wrld, Chunk** chun
 			brickSlotIdx++;
 		}
 
-		skip_dst[c] = solidCounts[c] > 0 ? 1 : 0;
+		skip_dst[c] = packChunkOwner(chunk->coord, solidCounts[c] > 0);
 
 		skip_regions[c] = (VkBufferImageCopy){0};
-		skip_regions[c].bufferOffset = (VkDeviceSize)c * sizeof(uint8_t);
+		skip_regions[c].bufferOffset = (VkDeviceSize)c * sizeof(uint32_t);
 		skip_regions[c].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		skip_regions[c].imageSubresource.mipLevel = 0;
 		skip_regions[c].imageSubresource.baseArrayLayer = 0;
@@ -2143,53 +2166,67 @@ void window_world_chunk_load(Window_t* window, World* wrld, Chunk** chunks, uint
 
 }
 
-void window_world_chunk_unload(Window_t* window, World* wrld, Chunk* chunk) {
+
+void window_world_chunk_unload(Window_t* window, World* wrld, Chunk** chunks, uint32_t count) {
 	const uint32_t bricksPerChunkAxis = CHUNK_DIM / VOXEL_BRICK_SIZE; // 4
 	const uint32_t bricksPerChunk = bricksPerChunkAxis * bricksPerChunkAxis * bricksPerChunkAxis; // 64
 
-	VkDeviceSize slot_staging_size = (VkDeviceSize)bricksPerChunk * sizeof(uint32_t);
-	Vk_Buffer_t slot_staging = createHostVisibleBuffer(window, slot_staging_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	if (count == 0) { return; }
+
+	uint32_t totalBrickSlots = count * bricksPerChunk;
+	Vk_Buffer_t slot_staging = createHostVisibleBuffer(window, (VkDeviceSize)totalBrickSlots * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 	uint32_t* slot_dst = (uint32_t*)slot_staging.mapped;
-	for (uint32_t b = 0; b < bricksPerChunk; b++) { slot_dst[b] = EMPTY_SLOT; }
+	for (uint32_t i = 0; i < totalBrickSlots; i++) { slot_dst[i] = EMPTY_SLOT; }
+	VkBufferImageCopy* regions = malloc(sizeof(VkBufferImageCopy) * totalBrickSlots);
 
-	VkBufferImageCopy* regions = malloc(sizeof(VkBufferImageCopy) * bricksPerChunk);
-	for (uint32_t b = 0; b < bricksPerChunk; b++) {
-		uint32_t bx = b % bricksPerChunkAxis;
-		uint32_t by = (b / bricksPerChunkAxis) % bricksPerChunkAxis;
-		uint32_t bz = b / (bricksPerChunkAxis * bricksPerChunkAxis);
+	Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, (VkDeviceSize)count * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+	uint32_t* skip_dst = (uint32_t*)skip_staging.mapped;
+	VkBufferImageCopy* skip_regions = malloc(sizeof(VkBufferImageCopy) * count);
 
-		uint32_t worldBrickX = (uint32_t)wrapChunkCoord(chunk->coord.x) * bricksPerChunkAxis + bx;
-		uint32_t worldBrickY = (uint32_t)wrapChunkCoord(chunk->coord.y) * bricksPerChunkAxis + by;
-		uint32_t worldBrickZ = (uint32_t)wrapChunkCoord(chunk->coord.z) * bricksPerChunkAxis + bz;
+	uint32_t brickSlotIdx = 0;
+	for (uint32_t c = 0; c < count; c++) {
+		Chunk* chunk = chunks[c];
 
-		regions[b] = (VkBufferImageCopy){0};
-		regions[b].bufferOffset = (VkDeviceSize)b * sizeof(uint32_t);
-		regions[b].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		regions[b].imageSubresource.mipLevel = 0;
-		regions[b].imageSubresource.baseArrayLayer = 0;
-		regions[b].imageSubresource.layerCount = 1;
-		regions[b].imageOffset.x = (int32_t)worldBrickX;
-		regions[b].imageOffset.y = (int32_t)worldBrickY;
-		regions[b].imageOffset.z = (int32_t)worldBrickZ;
-		regions[b].imageExtent.width = 1;
-		regions[b].imageExtent.height = 1;
-		regions[b].imageExtent.depth = 1;
+		for (uint32_t b = 0; b < bricksPerChunk; b++) {
+			uint32_t bx = b % bricksPerChunkAxis;
+			uint32_t by = (b / bricksPerChunkAxis) % bricksPerChunkAxis;
+			uint32_t bz = b / (bricksPerChunkAxis * bricksPerChunkAxis);
+
+			uint32_t worldBrickX = (uint32_t)wrapChunkCoord(chunk->coord.x) * bricksPerChunkAxis + bx;
+			uint32_t worldBrickY = (uint32_t)wrapChunkCoord(chunk->coord.y) * bricksPerChunkAxis + by;
+			uint32_t worldBrickZ = (uint32_t)wrapChunkCoord(chunk->coord.z) * bricksPerChunkAxis + bz;
+
+			regions[brickSlotIdx] = (VkBufferImageCopy){0};
+			regions[brickSlotIdx].bufferOffset = (VkDeviceSize)brickSlotIdx * sizeof(uint32_t);
+			regions[brickSlotIdx].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			regions[brickSlotIdx].imageSubresource.mipLevel = 0;
+			regions[brickSlotIdx].imageSubresource.baseArrayLayer = 0;
+			regions[brickSlotIdx].imageSubresource.layerCount = 1;
+			regions[brickSlotIdx].imageOffset.x = (int32_t)worldBrickX;
+			regions[brickSlotIdx].imageOffset.y = (int32_t)worldBrickY;
+			regions[brickSlotIdx].imageOffset.z = (int32_t)worldBrickZ;
+			regions[brickSlotIdx].imageExtent.width = 1;
+			regions[brickSlotIdx].imageExtent.height = 1;
+			regions[brickSlotIdx].imageExtent.depth = 1;
+
+			brickSlotIdx++;
+		}
+
+		skip_dst[c] = 0;
+
+		skip_regions[c] = (VkBufferImageCopy){0};
+		skip_regions[c].bufferOffset = (VkDeviceSize)c * sizeof(uint32_t);
+		skip_regions[c].imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		skip_regions[c].imageSubresource.mipLevel = 0;
+		skip_regions[c].imageSubresource.baseArrayLayer = 0;
+		skip_regions[c].imageSubresource.layerCount = 1;
+		skip_regions[c].imageOffset.x = wrapChunkCoord(chunk->coord.x);
+		skip_regions[c].imageOffset.y = wrapChunkCoord(chunk->coord.y);
+		skip_regions[c].imageOffset.z = wrapChunkCoord(chunk->coord.z);
+		skip_regions[c].imageExtent.width = 1;
+		skip_regions[c].imageExtent.height = 1;
+		skip_regions[c].imageExtent.depth = 1;
 	}
-
-	Vk_Buffer_t skip_staging = createHostVisibleBuffer(window, sizeof(uint8_t), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
-	*(uint8_t*)skip_staging.mapped = 0;
-
-	VkBufferImageCopy skip_region = {0};
-	skip_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	skip_region.imageSubresource.mipLevel = 0;
-	skip_region.imageSubresource.baseArrayLayer = 0;
-	skip_region.imageSubresource.layerCount = 1;
-	skip_region.imageOffset.x = wrapChunkCoord(chunk->coord.x);
-	skip_region.imageOffset.y = wrapChunkCoord(chunk->coord.y);
-	skip_region.imageOffset.z = wrapChunkCoord(chunk->coord.z);
-	skip_region.imageExtent.width = 1;
-	skip_region.imageExtent.height = 1;
-	skip_region.imageExtent.depth = 1;
 
 	VkCommandBufferAllocateInfo cmd_alloc_info = {0};
 	cmd_alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -2229,8 +2266,8 @@ void window_world_chunk_unload(Window_t* window, World* wrld, Chunk* chunk) {
 	to_transfer_dep.pImageMemoryBarriers = to_transfer;
 	vkCmdPipelineBarrier2(cmd, &to_transfer_dep);
 
-	vkCmdCopyBufferToImage(cmd, slot_staging.buffer, window->vk_objects.brickIndirectionTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, bricksPerChunk, regions);
-	vkCmdCopyBufferToImage(cmd, skip_staging.buffer, window->vk_objects.chunkSkipTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &skip_region);
+	vkCmdCopyBufferToImage(cmd, slot_staging.buffer, window->vk_objects.brickIndirectionTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, totalBrickSlots, regions);
+	vkCmdCopyBufferToImage(cmd, skip_staging.buffer, window->vk_objects.chunkSkipTexture.outputImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, count, skip_regions);
 
 	VkImageMemoryBarrier2 to_shader_read[2];
 	for (int b = 0; b < 2; b++) {
@@ -2261,6 +2298,7 @@ void window_world_chunk_unload(Window_t* window, World* wrld, Chunk* chunk) {
 	vkFreeCommandBuffers(window->vk_objects.device, window->vk_objects.frameResources[0].commandPool, 1, &cmd);
 
 	free(regions);
+	free(skip_regions);
 	destroyVkBuffer(window->vk_objects.device, &slot_staging);
 	destroyVkBuffer(window->vk_objects.device, &skip_staging);
 }
@@ -2273,14 +2311,13 @@ void window_world_chunk_streaming(Window_t* window, World* wrld) {
 	for (uint32_t i = 0; i < chunks_per_frame; i++) {
 		if (!q_emtpy(&wrld->chunk_load_queue)) {
 			iVector_t chunkCoord = q_pop(&wrld->chunk_load_queue);
-			hmdel(wrld->pending_map, chunkCoord);
 			int idx = world_chunk_load(wrld, chunkCoord);
 			if (idx != -1) {
 
 				int collisionIdx = world_chunk_find_collision(wrld, chunkCoord, idx);
 				if (collisionIdx != -1) {
 					Chunk* collidingChunk = &wrld->chunk_map[collisionIdx].value;
-					window_world_chunk_unload(window, wrld, collidingChunk);
+					window_world_chunk_unload(window, wrld, &collidingChunk, 1);
 					world_chunk_unload_by_index(wrld, collisionIdx);
 				}
 
@@ -2299,16 +2336,29 @@ void window_world_chunk_streaming(Window_t* window, World* wrld) {
 		window_world_chunk_load(window, wrld, loaded_chunks, loaded_count);
 	}
 
-	for (uint32_t i = 0; i < chunks_per_frame; i++) {
-		if (q_emtpy(&wrld->chunk_rmf_queue)) {return;}
+	iVector_t unload_coords[CHUNK_STREAM_BATCH_SIZE << 2];
+	uint32_t unload_count = 0;
+
+	for (uint32_t i = 0; i < chunks_per_frame << 2; i++) {
+		if (q_emtpy(&wrld->chunk_rmf_queue)) {break;}
 		iVector_t chunkCoord = q_pop(&wrld->chunk_rmf_queue);
-		hmdel(wrld->pending_map, chunkCoord);
-		int unloadIdx = hmgeti(wrld->chunk_map, chunkCoord);
-		if (unloadIdx != -1) {
-			Chunk* chunk = &wrld->chunk_map[unloadIdx].value;
-			window_world_chunk_unload(window, wrld, chunk); //clear GPU first
-			world_chunk_unload_by_index(wrld, unloadIdx);
-		} else {break;}
+		if (hmgeti(wrld->chunk_map, chunkCoord) == -1) {break;}
+		unload_coords[unload_count++] = chunkCoord;
+	}
+
+	if (unload_count > 0) {
+		// resolved just-in-time, since each world_chunk_unload_by_index below can reshuffle chunk_map
+		Chunk* unload_chunks[CHUNK_STREAM_BATCH_SIZE << 2];
+		for (uint32_t i = 0; i < unload_count; i++) {
+			int idx = hmgeti(wrld->chunk_map, unload_coords[i]);
+			unload_chunks[i] = &wrld->chunk_map[idx].value;
+		}
+		window_world_chunk_unload(window, wrld, unload_chunks, unload_count); //clear GPU first
+
+		for (uint32_t i = 0; i < unload_count; i++) {
+			int idx = hmgeti(wrld->chunk_map, unload_coords[i]);
+			world_chunk_unload_by_index(wrld, idx);
+		}
 	}
 }
 

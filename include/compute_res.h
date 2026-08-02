@@ -23,6 +23,10 @@ typedef struct {
 
     float tan_fov_v;
 	float tan_fov_h;
+    float _pad0[2];
+
+    float stream_box_min[4];
+    float stream_box_max[4];
 } CameraData;
 
 typedef struct {

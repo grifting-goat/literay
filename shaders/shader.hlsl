@@ -1,7 +1,7 @@
 [[vk::binding(1, 0)]] Texture3D<uint> brickAtlasIn; //atlas-packed BRICK_SIZE^3 bricks
 [[vk::binding(6, 0)]] Texture3D<uint> brickIndirectionIn; // brick coord
 [[vk::binding(7, 0)]] Texture3D<uint> voxelOccupancyIn;
-[[vk::binding(11, 0)]] Texture3D<uint> chunkSkipIn; // nonzero if that chunk has any geometry at all
+[[vk::binding(11, 0)]] Texture3D<uint> chunkSkipIn; // per-slot packed owner chunk coord + geometry bit; 0 = nothing loaded
 
 struct Material {
     float4 color;
@@ -25,6 +25,10 @@ cbuffer CameraData {
 
     float tan_fov_v;
     float tan_fov_h;
+    float2 _pad_cam;
+
+    float4 stream_box_min; // world-voxel bounds of the loaded streaming box, camera chunk +- stream radius
+    float4 stream_box_max;
 };
 
 struct Entity {
@@ -167,10 +171,14 @@ Ray CreateCameraRay(float x, float y) {
 }
 
 
-// coarsest skip: does this chunk have any geometry at all
 bool ChunkHasGeometry(int3 chunkCell) {
     int3 texCell = WrapCoord3(chunkCell, CHUNK_STREAM_WINDOW_CHUNKS);
-    return chunkSkipIn.Load(int4(texCell, 0)) != 0;
+    uint owner = chunkSkipIn.Load(int4(texCell, 0));
+    uint expected = (uint(chunkCell.x) & 0x3FFu)
+        | ((uint(chunkCell.y) & 0x3FFu) << 10)
+        | ((uint(chunkCell.z) & 0x3FFu) << 20)
+        | (1u << 30) | (1u << 31);
+    return owner == expected;
 }
 
 uint ReadBrickSlot(int3 brickCell) {
@@ -261,8 +269,13 @@ Hit CastStaticRay(Ray ray) {
     float3 tDelta = abs(invDir);
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
-    // no fixed world boundary anymore -- GPU addressing wraps (WrapCoord3), so the only real limit is travel distance
-    float tExit = MAX_RAY_DISTANCE - 0.01f;
+    // rays terminate 1 voxel inside the streaming box edge: the outermost layer sits right against
+    // whatever's beyond the box (unloaded or aliased), so pull the cutoff in a voxel to avoid grazing it
+    float3 boxT0 = (stream_box_min.xyz + 1.0f - ray.origin) * invDir;
+    float3 boxT1 = (stream_box_max.xyz - 1.0f - ray.origin) * invDir;
+    float3 boxTBig = select(ray.direction != 0.0f, max(boxT0, boxT1), FLT_INF);
+    float boxExit = min(min(boxTBig.x, boxTBig.y), boxTBig.z);
+    float tExit = min(MAX_RAY_DISTANCE, boxExit) - 0.01f;
 
     // level 1: chunk-granularity skip -- avoids ever touching brick indirection for empty/unloaded chunks
     int3 chunkCell = cell >> int(CHUNK_DIM_SHIFT);
@@ -289,7 +302,12 @@ Hit CastStaticRay(Ray ray) {
             float chunkBoundary = min(min(chunkTMax.x, chunkTMax.y), chunkTMax.z) + 0.01f;
             float chunkExit = min(chunkBoundary, tExit);
 
+            int3 chunkBrickMin = chunkMin >> int(BRICK_SIZE_SHIFT);
+            int3 chunkBrickMax = chunkBrickMin + int(BRICKS_PER_CHUNK_AXIS) - 1;
+
             while (brickTCurrent < chunkExit) {
+
+                if (any(brickCell < chunkBrickMin) || any(brickCell > chunkBrickMax)) { break; }
 
                 uint slot = ReadBrickSlot(brickCell);
                 if (slot != EMPTY_SLOT) {
@@ -304,8 +322,10 @@ Hit CastStaticRay(Ray ray) {
 
                     float brickBoundary = min(min(brickTMax.x, brickTMax.y), brickTMax.z) + 0.01f;
                     float brickExit = min(brickBoundary, chunkExit);
+                    int3 brickMax = brickMin + int(BRICK_SIZE) - 1;
 
                     while (tCurrent < brickExit) {
+                        if (any(fineCell < brickMin) || any(fineCell > brickMax)) { break; }
                         if (IsVoxelSolid(fineCell)) {
                             hit.mat_type = ReadAtlasVoxel(atlasOrigin + (fineCell - brickMin));
                             hit.dist = tCurrent;

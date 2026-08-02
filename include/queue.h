@@ -33,6 +33,11 @@ static void q_unalloc(Queue_t* q) {
     q->buffer = NULL;
 }
 
+static void q_clear(Queue_t* q) {
+    q->head = -1;
+    q->tail = -1;
+}
+
 static bool q_full(Queue_t* q) {
     return (q->tail + 1) % q->size == q->head;
 }

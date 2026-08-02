@@ -10,7 +10,6 @@
 #include "stb_ds.h"
 
 //move these elsewhere later
-#define CHUNK_STREAM_RADIUS CHUNK_COORD_LIMIT
 #define CHUNK_STREAM_DIAMETER (CHUNK_STREAM_RADIUS * 2)
 #define CHUNK_STREAM_COUNT (CHUNK_STREAM_DIAMETER * CHUNK_STREAM_DIAMETER * CHUNK_STREAM_DIAMETER)
 
@@ -85,7 +84,6 @@ World world_create(uint32_t seed) {
     wrld.seed = seed;
 
     wrld.chunk_map = NULL;
-    wrld.pending_map = NULL;
 
     return wrld;
 }
@@ -93,9 +91,9 @@ World world_create(uint32_t seed) {
 
 void world_load_spawn_chunk(World* wrld) {
 
-    for (int x = -7; x < 8; x++) {
-        for (int y = -7; y < 8; y++) {
-            for (int z = -7; z < 8; z++) {
+    for (int x = -15; x < 16; x++) {
+        for (int y = -15; y < 16; y++) {
+            for (int z = -15; z < 16; z++) {
                 iVector_t coord = iVector_create(x, y, z);
                 Chunk chunk = chunk_create(wrld, coord);
                 
@@ -181,6 +179,8 @@ int world_chunk_load(World* wrld, iVector_t chunkCoords) {
 }
 
 void world_chunk_memory_queue(World* wrld, Vector_t* cameraPos) {
+    q_clear(&wrld->chunk_load_queue);
+    q_clear(&wrld->chunk_rmf_queue);
 
     iVector_t chunk_coord = iVector_create((int32_t)floor(cameraPos->x / CHUNK_DIM), (int32_t)floor(cameraPos->y / CHUNK_DIM), (int32_t)floor(cameraPos->z / CHUNK_DIM));
 
@@ -189,9 +189,8 @@ void world_chunk_memory_queue(World* wrld, Vector_t* cameraPos) {
         iVector_t test_coord = iVector_create(chunk_coord.x + off.dx, chunk_coord.y + off.dy, chunk_coord.z + off.dz);
 
         int idx = hmgeti(wrld->chunk_map, test_coord);
-        if (idx == -1 && hmgeti(wrld->pending_map, test_coord) == -1) {
+        if (idx == -1) {
             q_enque(&wrld->chunk_load_queue, &test_coord);
-            hmput(wrld->pending_map, test_coord, true);
         }
 
     }
@@ -203,12 +202,10 @@ void world_chunk_memory_queue(World* wrld, Vector_t* cameraPos) {
         int32_t dy = test_coord.y - cam_coord.y;
         int32_t dz = test_coord.z - cam_coord.z;
 
-        if ((dx < -CHUNK_STREAM_RADIUS || dx >= CHUNK_STREAM_RADIUS ||
+        if (dx < -CHUNK_STREAM_RADIUS || dx >= CHUNK_STREAM_RADIUS ||
             dy < -CHUNK_STREAM_RADIUS || dy >= CHUNK_STREAM_RADIUS ||
-            dz < -CHUNK_STREAM_RADIUS || dz >= CHUNK_STREAM_RADIUS) &&
-            hmgeti(wrld->pending_map, test_coord) == -1) {
+            dz < -CHUNK_STREAM_RADIUS || dz >= CHUNK_STREAM_RADIUS) {
             q_enque(&wrld->chunk_rmf_queue, &test_coord);
-            hmput(wrld->pending_map, test_coord, true);
         }
     }
 
@@ -263,8 +260,9 @@ int world_chunk_find_collision(World* wrld, iVector_t coord, int excludeIdx) {
     for (int i = 0; i < hmlen(wrld->chunk_map); i++) {
         if (i == excludeIdx) { continue; }
         iVector_t c = wrld->chunk_map[i].key;
-        if (c.y != coord.y) { continue; }
-        if ((c.x - coord.x) % CHUNK_STREAM_WINDOW == 0 && (c.z - coord.z) % CHUNK_STREAM_WINDOW == 0) {
+        if ((c.x - coord.x) % CHUNK_STREAM_WINDOW == 0 &&
+            (c.y - coord.y) % CHUNK_STREAM_WINDOW == 0 &&
+            (c.z - coord.z) % CHUNK_STREAM_WINDOW == 0) {
             return i;
         }
     }
@@ -402,9 +400,6 @@ void world_destroy(World* wrld) {
     }
     hmfree(wrld->chunk_map);
     wrld->chunk_map = NULL;
-
-    hmfree(wrld->pending_map);
-    wrld->pending_map = NULL;
 
     q_unalloc(&wrld->chunk_load_queue);
     q_unalloc(&wrld->chunk_rmf_queue);
