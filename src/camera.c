@@ -69,9 +69,9 @@ void camera_position_controller(Window_t* window, Camera* cam, float frameTime) 
 	
 
 	if (glfwGetKey(window->glfw_window, GLFW_KEY_G) == GLFW_PRESS) {
-		cam->pos.x = MAX_LOADED_VOXEL_DIM / 2;
-		cam->pos.y = MAX_LOADED_VOXEL_DIM / 2;
-		cam->pos.z = MAX_LOADED_VOXEL_DIM / 2;
+		cam->pos.x = MAX_LOADED_VOXEL_DIM_XZ / 2;
+		cam->pos.y = MAX_LOADED_VOXEL_DIM_Y / 2;
+		cam->pos.z = MAX_LOADED_VOXEL_DIM_XZ / 2;
 	}
 
 	float moveLenSq = moveX * moveX + moveZ * moveZ;
@@ -83,4 +83,12 @@ void camera_position_controller(Window_t* window, Camera* cam, float frameTime) 
 		cam->pos.x += moveX * moveSpeed * frameTime;
 		cam->pos.z += moveZ * moveSpeed * frameTime;
 	}
+}
+
+void camera_teleport_command(void* context, int argc, char* argv[]) {
+	Camera* cam = (Camera*)context;
+	if (argc != 4) {printf("usage: tp <x> <y> <z>\n"); return;}
+	cam->pos.x = (float)atoi(argv[1]);
+	cam->pos.y = (float)atoi(argv[2]);
+	cam->pos.z = (float)atoi(argv[3]);
 }

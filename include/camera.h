@@ -38,4 +38,6 @@ bool camera_check_moved(Camera* cam);
 struct Window_t; 
 void camera_position_controller(struct Window_t* window, Camera* cam, float frameTime);
 
+void camera_teleport_command(void* context, int argc, char* argv[]);
+
 #endif //CAMERA_H

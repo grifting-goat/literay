@@ -4,11 +4,13 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+
+#include "world.h"
+
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
 
 #include "camera.h"
-#include "world.h"
 #include "model.h"
 
 
@@ -22,13 +24,17 @@
 #define WORLD_TEXTURE_FORMAT  VK_FORMAT_R8_UINT // 3D voxel material ids
 #define MAX_MATERIALS         256U // one per possible voxel byte value
 #define MAX_MODELS            16U
-#define MAX_ENTITIES           16U
+#define MAX_ENTITIES          16U
 
 
-#define MAX_LOADED_VOXEL_DIM 1024U // max voxels at once -> per axis
+#define MAX_LOADED_VOXEL_DIM_XZ (CHUNK_STREAM_WINDOW_XZ * CHUNK_DIM)
+#define MAX_LOADED_VOXEL_DIM_Y  (CHUNK_STREAM_WINDOW_Y * CHUNK_DIM)
 #define VOXEL_BRICK_SIZE 8U // match BRICK_SIZE in shader
 
 #define EMPTY_SLOT 0xFFFFFFFFu
+
+#define CHUNK_STREAM_RING_DEPTH 2 
+#define CHUNK_UNLOAD_RING_DEPTH 4
 
 
 #include "compute_res.h"
@@ -60,6 +66,38 @@ typedef struct {
 	void* mapped;
 } Vk_Buffer_t;
 
+// persistent per-slot resources for the chunk-streaming upload rings (display.c),
+// reused across calls instead of allocating/freeing a command buffer + staging buffer every time
+typedef struct {
+	VkCommandPool commandPool;
+	VkCommandBuffer commandBuffer;
+	Vk_Buffer_t staging;
+	VkBufferImageCopy* regions;
+	uint64_t submittedValue; // streamTimelineSemaphore value to wait for before reusing this slot; 0 = never used
+} OccupancyMaskStreamSlot_t;
+
+typedef struct {
+	VkCommandPool commandPool;
+	VkCommandBuffer commandBuffer;
+	Vk_Buffer_t slotStaging;
+	Vk_Buffer_t skipStaging;
+	Vk_Buffer_t voxelStaging;
+	VkBufferImageCopy* indirectionRegions;
+	VkBufferImageCopy* skipRegions;
+	VkBufferImageCopy* atlasRegions;
+	uint64_t submittedValue;
+} AtlasStreamSlot_t;
+
+typedef struct {
+	VkCommandPool commandPool;
+	VkCommandBuffer commandBuffer;
+	Vk_Buffer_t slotStaging;
+	Vk_Buffer_t skipStaging;
+	VkBufferImageCopy* regions;
+	VkBufferImageCopy* skipRegions;
+	uint64_t submittedValue;
+} UnloadStreamSlot_t;
+
 typedef struct {
     VkSwapchainKHR swapchain;
 	VkImage* swapchainImages;
@@ -90,6 +128,15 @@ typedef struct {
 	FrameResources_t frameResources[MAX_FRAMES_IN_FLIGHT];
 	uint32_t frameCounter;
 
+	VkSemaphore streamTimelineSemaphore; // chunk-streaming uploads chain off this instead of vkQueueWaitIdle
+	uint64_t streamTimelineValue; // last value signaled by a streaming submission; 0 = none yet
+	OccupancyMaskStreamSlot_t occupancyMaskStreamSlots[CHUNK_STREAM_RING_DEPTH];
+	uint32_t occupancyMaskStreamSlotIndex;
+	AtlasStreamSlot_t atlasStreamSlots[CHUNK_STREAM_RING_DEPTH];
+	uint32_t atlasStreamSlotIndex;
+	UnloadStreamSlot_t unloadStreamSlots[CHUNK_UNLOAD_RING_DEPTH];
+	uint32_t unloadStreamSlotIndex;
+
     Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
     Vk_Image_t accumImageRes; // single, persistent across frames
     uint32_t accumCount;
@@ -117,7 +164,6 @@ typedef struct {
     Vk_Buffer_t entityDataBuffer[MAX_FRAMES_IN_FLIGHT];
     Vk_Buffer_t modelBuffer;
     Vk_Buffer_t modelVoxelBuffer;
-
 
 } Vk_Objects_t;
 

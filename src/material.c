@@ -69,7 +69,7 @@ Material material_list[0xFF] = {
         .emissionColor = {0.016f, 0.561f, 0.008f, 1.0f},
         .emissionStrength = 0.0f,
         .smoothness = 0.4f,
-        .specularProbability = 1.0f,
+        .specularProbability = 0.0f,
         .noise = 0.03f,
         .opaque = 1.0f
     },
@@ -173,13 +173,22 @@ Material material_list[0xFF] = {
         .opaque = 1.0f
     },
     [GLASS] = {
-        .color = {1.0f, 0.0f, 0.0f, 1.0f},
+        .color = {1.0f, 1.0f, 1.0f, 1.0f},
         .emissionColor = {1.0f, 1.0f, 1.0f, 1.0f},
         .emissionStrength = 0.0f,
         .smoothness = 0.2f,
         .specularProbability = 0.05f,
         .noise = 0.05f,
         .opaque = 0.1f
+    },
+    [SNOW] = {
+        .color = {0.91f, 1.0f, 0.996f, 1.0f},
+        .emissionColor = {0.91f, 1.0f, 0.996f, 1.0f},
+        .emissionStrength = 0.0f,
+        .smoothness = 0.82f,
+        .specularProbability = 0.2f,
+        .noise = 0.08f,
+        .opaque = 1.0f
     },
 };
 

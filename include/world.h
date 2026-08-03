@@ -7,16 +7,33 @@
 
 #include "vector.h"
 #include "queue.h"
+#include "chunk_threads.h"
 
 
 #define CHUNK_DIM 32
 #define CHUNK_SIZE CHUNK_DIM * CHUNK_DIM * CHUNK_DIM
 
-#define CHUNK_COORD_LIMIT 16
-#define CHUNK_STREAM_RADIUS CHUNK_COORD_LIMIT
-#define CHUNK_STREAM_WINDOW (2 * CHUNK_COORD_LIMIT) // GPU addressing wraps every this-many chunks, per axis
+// CHUNK_STREAM_RADIUS_XZ must produce a power-of-2 CHUNK_STREAM_WINDOW_XZ. Non-power-of-2 3D
+// texture dimensions (44 was previously used) caused chunks near the wrapped edge to silently
+// read back a different chunk's data -- almost certainly a GPU/driver tiling quirk at the
+// boundary texel, invisible from source since both CPU write and shader read compute correct
+// values. 32 (giving a 64-chunk window) is confirmed working and gives a larger view distance
+// than the original 22 besides.
+#define WORLD_HEIGHT_LIMIT 512
+#define WORLD_CHUNK_Y_MIN 0
+#define WORLD_CHUNK_Y_MAX (WORLD_HEIGHT_LIMIT / CHUNK_DIM)
 
-#define CHUNK_QUEUE_SIZE 32
+#define CHUNK_STREAM_RADIUS_XZ 32
+#define CHUNK_STREAM_WINDOW_XZ (2 * CHUNK_STREAM_RADIUS_XZ)
+
+
+#define CHUNK_STREAM_WINDOW_Y  (WORLD_CHUNK_Y_MAX - WORLD_CHUNK_Y_MIN)
+#define CHUNK_STREAM_RADIUS_Y  (CHUNK_STREAM_WINDOW_Y / 2)
+#define CHUNK_STREAM_CENTER_Y  (WORLD_CHUNK_Y_MIN + CHUNK_STREAM_RADIUS_Y)
+
+#define CHUNK_QUEUE_SIZE 64
+
+#define CHUNK_SLOT_GRID_COUNT (CHUNK_STREAM_WINDOW_XZ * CHUNK_STREAM_WINDOW_Y * CHUNK_STREAM_WINDOW_XZ)
 
 
 typedef enum {
@@ -50,54 +67,71 @@ static Structure_t structure_list[STRUCTURE_COUNT];
 void structure_list_create(); //programaticly define structures
 
 
-//32^3 chunk size
-//8 ^3 brick size
-typedef struct {
-    iVector_t coord;
-    uint64_t brickMask;
-    uint64_t brickDirtyMask;
-    bool loaded;
-
-    uint8_t* voxels;
-    uint32_t* voxelMask;
-} Chunk;
-
 typedef struct {
     iVector_t  key;
     Chunk value;
 } ChunkMapEntry;
 
 typedef struct {
+    bool occupied;
+    iVector_t coord;
+} SlotGridEntry;
+
+typedef struct {
 
     double scale;
 	double amplitude;
+    double persistence;
+    double lacunarity;
 	uint32_t octaves;
     uint32_t sea_level;
+
+    int perm[256];
 
 } PerlinParams;
 
 typedef struct {
+    PerlinParams ymap;
+    PerlinParams amplify;
+
+} WorldGenerator;
+
+WorldGenerator world_generator_create(uint32_t seed);
+
+typedef struct {
 
     uint32_t seed;
-    PerlinParams perlin_params;
     ChunkMapEntry* chunk_map;
+    SlotGridEntry* slot_grid;
+
+    iVector_t stream_center; // camera chunk (y fixed) the load/rmf queues were last built around
 
     Queue_t chunk_load_queue;
     Queue_t chunk_rmf_queue;
+
+    WorldGenerator generator;
+
+    ChunkThreadPool_t genPool;
 
 } World;
 
 World world_create(uint32_t seed);
 
+void world_chunk_gen_workers_start(World* wrld);
+void world_chunk_gen_workers_stop(World* wrld);
+void world_chunk_gen_submit(World* wrld, iVector_t coord);
+bool world_chunk_gen_poll(World* wrld, Chunk* outChunk);
+
+int world_chunk_insert(World* wrld, Chunk* chunk);
+
 void world_load_spawn_chunk(World* wrld);
+
 
 
 int world_chunk_load(World* wrld, iVector_t chunkCoords);
 
 void world_chunk_memory_queue(World* wrld, Vector_t* cameraPos);
 
-int world_chunk_test(World* wrld, Vector_t* cameraPos); // returns the chunk_map index or -1
-int world_chunk_untest(World* wrld, Vector_t* cameraPos); // returns the chunk_map index of an out-of-range chunk, or -1
 void world_chunk_unload_by_index(World* wrld, int idx);
 int world_chunk_find_collision(World* wrld, iVector_t coord, int excludeIdx); // returns the chunk_map index of a same-slot chunk, or -1
 

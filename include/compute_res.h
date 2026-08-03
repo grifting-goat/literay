@@ -33,8 +33,7 @@ typedef struct {
     float position[4];
     float rotation[4];
 
-    // conservative world-space AABB (valid under any yaw), precomputed on the CPU
-    // so the shader doesn't redo this math on every CastDynamicRay call
+
     float worldMin[4];
     float worldMax[4];
 

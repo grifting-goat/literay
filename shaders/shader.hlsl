@@ -1,7 +1,7 @@
 [[vk::binding(1, 0)]] Texture3D<uint> brickAtlasIn; //atlas-packed BRICK_SIZE^3 bricks
 [[vk::binding(6, 0)]] Texture3D<uint> brickIndirectionIn; // brick coord
 [[vk::binding(7, 0)]] Texture3D<uint> voxelOccupancyIn;
-[[vk::binding(11, 0)]] Texture3D<uint> chunkSkipIn; // per-slot packed owner chunk coord + geometry bit; 0 = nothing loaded
+[[vk::binding(11, 0)]] Texture3D<uint> chunkSkipIn;
 
 struct Material {
     float4 color;
@@ -27,7 +27,7 @@ cbuffer CameraData {
     float tan_fov_h;
     float2 _pad_cam;
 
-    float4 stream_box_min; // world-voxel bounds of the loaded streaming box, camera chunk +- stream radius
+    float4 stream_box_min;
     float4 stream_box_max;
 };
 
@@ -76,7 +76,8 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 512.0f;
+static const float MAX_RAY_DISTANCE = 2048.0f / 2.0f;
+static const float MAX_TOTAL_DISTANCE = MAX_RAY_DISTANCE * 2.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 static const uint MAX_BONUS_BOUNCES = 3;
@@ -89,11 +90,17 @@ static const uint CHUNK_DIM = 32;
 static const uint CHUNK_DIM_SHIFT = 5; // log2(CHUNK_DIM)
 static const uint BRICKS_PER_CHUNK_AXIS = 4; // CHUNK_DIM / BRICK_SIZE
 
-static const int CHUNK_STREAM_WINDOW_VOXELS = 1024; // CHUNK_STREAM_WINDOW * CHUNK_DIM
-static const int CHUNK_STREAM_WINDOW_BRICKS = 128;  // CHUNK_STREAM_WINDOW_VOXELS / BRICK_SIZE
-static const int CHUNK_STREAM_WINDOW_CHUNKS = CHUNK_STREAM_WINDOW_BRICKS / BRICKS_PER_CHUNK_AXIS; // derived, not a separate synced constant
+static const int CHUNK_STREAM_WINDOW_VOXELS_XZ = 2048;
+static const int CHUNK_STREAM_WINDOW_VOXELS_Y = 512;
+static const int CHUNK_STREAM_WINDOW_BRICKS_XZ = CHUNK_STREAM_WINDOW_VOXELS_XZ / int(BRICK_SIZE);
+static const int CHUNK_STREAM_WINDOW_BRICKS_Y = CHUNK_STREAM_WINDOW_VOXELS_Y / int(BRICK_SIZE);
+static const int CHUNK_STREAM_WINDOW_CHUNKS_XZ = CHUNK_STREAM_WINDOW_BRICKS_XZ / BRICKS_PER_CHUNK_AXIS;
+static const int CHUNK_STREAM_WINDOW_CHUNKS_Y = CHUNK_STREAM_WINDOW_BRICKS_Y / BRICKS_PER_CHUNK_AXIS;
 
-int3 WrapCoord3(int3 v, int n) {
+static const float DENSITY = 0.001f;
+
+int3 WrapCoord3Aniso(int3 v, int nXZ, int nY) {
+    int3 n = int3(nXZ, nY, nXZ);
     int3 m = v % n;
     return select(m < 0, m + n, m);
 }
@@ -110,6 +117,8 @@ struct Ray {
     float3 origin;
     float3 direction;
     float3 invDir;
+
+    float cumdist;
 
     float3 color;
     float3 incomingLight;
@@ -156,6 +165,7 @@ Ray CreateRay(float3 origin, float3 direction) {
     ray.origin = origin;
     ray.direction = normalize(direction);
     ray.invDir = rcp(ray.direction);
+    ray.cumdist = 0.000f;
     ray.color = float3(1.0f, 1.0f, 1.0f);
     ray.incomingLight = 0.0f;
     return ray;
@@ -172,17 +182,17 @@ Ray CreateCameraRay(float x, float y) {
 
 
 bool ChunkHasGeometry(int3 chunkCell) {
-    int3 texCell = WrapCoord3(chunkCell, CHUNK_STREAM_WINDOW_CHUNKS);
+    int3 texCell = WrapCoord3Aniso(chunkCell, CHUNK_STREAM_WINDOW_CHUNKS_XZ, CHUNK_STREAM_WINDOW_CHUNKS_Y);
     uint owner = chunkSkipIn.Load(int4(texCell, 0));
-    uint expected = (uint(chunkCell.x) & 0x3FFu)
-        | ((uint(chunkCell.y) & 0x3FFu) << 10)
-        | ((uint(chunkCell.z) & 0x3FFu) << 20)
+    uint expected = (asuint(chunkCell.x) & 0x3FFu)
+        | ((asuint(chunkCell.y) & 0x3FFu) << 10)
+        | ((asuint(chunkCell.z) & 0x3FFu) << 20)
         | (1u << 30) | (1u << 31);
     return owner == expected;
 }
 
 uint ReadBrickSlot(int3 brickCell) {
-    int3 texCell = WrapCoord3(brickCell, CHUNK_STREAM_WINDOW_BRICKS);
+    int3 texCell = WrapCoord3Aniso(brickCell, CHUNK_STREAM_WINDOW_BRICKS_XZ, CHUNK_STREAM_WINDOW_BRICKS_Y);
     return brickIndirectionIn.Load(int4(texCell, 0));
 }
 
@@ -195,7 +205,7 @@ int3 DecodeAtlasSlot(uint slot) {
 
 // occupancy bit, addressed by world voxel coord
 bool IsVoxelSolid(int3 worldCell) {
-    int3 texCell = WrapCoord3(worldCell, CHUNK_STREAM_WINDOW_VOXELS);
+    int3 texCell = WrapCoord3Aniso(worldCell, CHUNK_STREAM_WINDOW_VOXELS_XZ, CHUNK_STREAM_WINDOW_VOXELS_Y);
     uint word = voxelOccupancyIn.Load(int4(texCell.x >> 5, texCell.y, texCell.z, 0));
     uint bit = uint(texCell.x) & 31u;
     return ((word >> bit) & 1u) != 0u;
@@ -213,6 +223,12 @@ float3 DDAStepMask(float3 tMax) {
     mask.z = 1.0f - mask.x - mask.y;
     return mask;
 } //goofy optimization fable said to do
+
+
+int3 SnapEntryCell(int3 floorCell, int3 cellMin, int3 cellMax, float3 normal) {
+    int3 snapped = select(normal < 0.0f, cellMin, cellMax);
+    return select(normal != 0.0f, snapped, floorCell);
+}
 
 
 //https://github.com/SebLague/Ray-Tracing
@@ -235,7 +251,7 @@ float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time o
 
 
 // dynamic/entity path temporarily disabled while the static path is rewritten for the brick atlas
-/*
+
 uint ReadModelVoxel(uint index) {
     uint word = modelVoxelsIn.Load(index & ~3u);
     return (word >> ((index & 3u) * 8u)) & 0xFFu;
@@ -250,7 +266,7 @@ bool TestAABB(Ray ray, float3 boundsMin, float3 boundsMax) {
     float tmax = min(min(tbig.x, tbig.y), tbig.z);
     return tmax >= tmin;
 }
-*/
+
 
 //standard dda voxel, over the static world grid
 Hit CastStaticRay(Ray ray) {
@@ -269,15 +285,14 @@ Hit CastStaticRay(Ray ray) {
     float3 tDelta = abs(invDir);
     float3 stepSign = max(sign(ray.direction), 0.0f);
 
-    // rays terminate 1 voxel inside the streaming box edge: the outermost layer sits right against
-    // whatever's beyond the box (unloaded or aliased), so pull the cutoff in a voxel to avoid grazing it
     float3 boxT0 = (stream_box_min.xyz + 1.0f - ray.origin) * invDir;
     float3 boxT1 = (stream_box_max.xyz - 1.0f - ray.origin) * invDir;
     float3 boxTBig = select(ray.direction != 0.0f, max(boxT0, boxT1), FLT_INF);
     float boxExit = min(min(boxTBig.x, boxTBig.y), boxTBig.z);
-    float tExit = min(MAX_RAY_DISTANCE, boxExit) - 0.01f;
+    float clipped = min(MAX_RAY_DISTANCE, MAX_TOTAL_DISTANCE - ray.cumdist);
+    float tExit = min(clipped, boxExit) - 0.01f;
 
-    // level 1: chunk-granularity skip -- avoids ever touching brick indirection for empty/unloaded chunks
+    // level 1: chunk skip
     int3 chunkCell = cell >> int(CHUNK_DIM_SHIFT);
     float3 chunkNextBoundary = float3(chunkCell) * CHUNK_DIM + stepSign * CHUNK_DIM;
     float3 chunkTMax = select(ray.direction != 0.0f, (chunkNextBoundary - ray.origin) * invDir, FLT_INF);
@@ -289,10 +304,12 @@ Hit CastStaticRay(Ray ray) {
 
         if (ChunkHasGeometry(chunkCell)) {
 
-            // level 2: brick-granularity skip within this chunk
-            float3 chunkPos = ray.origin + ray.direction * (chunkTCurrent + 0.01f);
+            // level 2: brick skip
             int3 chunkMin = chunkCell << int(CHUNK_DIM_SHIFT);
-            int3 brickCell = clamp(int3(floor(chunkPos)), chunkMin, chunkMin + int(CHUNK_DIM) - 1) >> int(BRICK_SIZE_SHIFT);
+            int3 chunkMax = chunkMin + int(CHUNK_DIM) - 1;
+            float3 chunkPos = ray.origin + ray.direction * chunkTCurrent;
+            int3 chunkEntryCell = SnapEntryCell(clamp(int3(floor(chunkPos)), chunkMin, chunkMax), chunkMin, chunkMax, normal);
+            int3 brickCell = chunkEntryCell >> int(BRICK_SIZE_SHIFT);
 
             float brickTCurrent = chunkTCurrent;
             float3 brickNextBoundary = float3(brickCell) * BRICK_SIZE + stepSign * BRICK_SIZE;
@@ -313,19 +330,20 @@ Hit CastStaticRay(Ray ray) {
                 if (slot != EMPTY_SLOT) {
                     int3 atlasOrigin = DecodeAtlasSlot(slot);
 
-                    float3 pos = ray.origin + ray.direction * (brickTCurrent + 0.01f);
                     int3 brickMin = brickCell << int(BRICK_SIZE_SHIFT);
-                    int3 fineCell = clamp(int3(floor(pos)), brickMin, brickMin + int(BRICK_SIZE) - 1);
+                    int3 brickMax = brickMin + int(BRICK_SIZE) - 1;
+                    float3 pos = ray.origin + ray.direction * brickTCurrent;
+                    int3 fineCell = SnapEntryCell(clamp(int3(floor(pos)), brickMin, brickMax), brickMin, brickMax, normal);
 
                     float tCurrent = brickTCurrent;
                     float3 tMax = select(ray.direction != 0.0f, (float3(fineCell) + stepSign - ray.origin) * invDir, FLT_INF);
 
                     float brickBoundary = min(min(brickTMax.x, brickTMax.y), brickTMax.z) + 0.01f;
                     float brickExit = min(brickBoundary, chunkExit);
-                    int3 brickMax = brickMin + int(BRICK_SIZE) - 1;
 
                     while (tCurrent < brickExit) {
                         if (any(fineCell < brickMin) || any(fineCell > brickMax)) { break; }
+                        // level 3: voxel skip
                         if (IsVoxelSolid(fineCell)) {
                             hit.mat_type = ReadAtlasVoxel(atlasOrigin + (fineCell - brickMin));
                             hit.dist = tCurrent;
@@ -360,7 +378,7 @@ Hit CastStaticRay(Ray ray) {
     return hit;
 }
 
-/*
+
 Hit CastEntityRay(Ray ray, Entity ent) {
 
     Hit hit;
@@ -472,13 +490,18 @@ Hit CastDynamicRay(Ray ray, int skipIndex) {
     }
     return best;
 }
-*/
+
 
 // skipIndex < 0 tests every entity; otherwise that single entity slot is excluded
 Hit CastRay(Ray ray, int skipIndex) {
-    return CastStaticRay(ray);
-}
+    Hit staticHit = CastStaticRay(ray);
 
+    Hit dynamicHit = CastDynamicRay(ray, skipIndex);
+    if (dynamicHit.dist < staticHit.dist) {
+        return dynamicHit;
+    }
+    return staticHit;
+}
 float3 Reflect(float3 dir, float3 normal) {
     return dir - 2 * dot(dir, normal) * normal;
 }
@@ -504,10 +527,28 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         float y = (float(pixel.y) + 0.5f + jitterY) / float(pc._screen_size.y);
 
         Ray r = CreateCameraRay(x, y);
+        float3 voidColor = 0.0f;
+        float viewDist = 0.0f;
+        bool trackViewDist = true;
+        bool escaped = false;
         for (uint bounces = 0; bounces < MAX_BOUNCES + bonus; bounces++) {
-            Hit hit = CastRay(r, bounces == 0 ? 0 : -1); // skip entity 0 (the player) only on the ray straight from the camera, so the player doesn't see themselves
+            Hit hit = CastRay(r, bounces == 0 ? 0 : -1);
+            r.cumdist += hit.dist;
+            if (trackViewDist && hit.mat_type != 0) {
+                // pair the fade color with the current segment's own direction, so a mirror
+                // fades toward the sky it's actually reflecting, not the camera's own direction
+                viewDist += hit.dist;
+                voidColor = GetEnvironmentLight(r) * r.color;
+            }
             if (hit.mat_type != 0) {
                 Material mat = materials[hit.mat_type];
+
+                float distScatter = log(RandomValue(rngState)) * -1 / DENSITY;
+                if (distScatter < hit.dist) {
+                    r.origin = r.origin + r.direction * distScatter;
+                    r.direction = RandomDirection(rngState);
+                    continue;
+                }
 
                 //shadow ray
                 if (!bounces || bonus == 1) { //keep shdows in mirrors
@@ -531,6 +572,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 r.origin = hit.end + hit.normal * 0.01f;
 
                 bool isSpecular = mat.specularProbability >= RandomValue(rngState);
+                r.cumdist -= hit.dist * isSpecular;
+                trackViewDist = isSpecular;
                 bonus = min(bonus + (uint)isSpecular, MAX_BONUS_BOUNCES);
 
                 float3 diffuseDir = normalize(hit.normal + RandomDirection(rngState));
@@ -540,24 +583,45 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 r.invDir = rcp(r.direction);
 
                 r.incomingLight += AmbientLight * r.color * (!isSpecular); //so specular doesnt add any ambiant light
+
+                float x = saturate(viewDist / MAX_RAY_DISTANCE);
+                if (x > 0.85f) {
+                    float voidT = 44.444f * ((x-0.85) * (x-0.85));
+                    r.incomingLight = lerp(r.incomingLight, voidColor, voidT);
+                }
+
+
             }
             else {
                 r.incomingLight += GetEnvironmentLight(r) * r.color;
+                escaped = true;
                 break;
             }
         }
 
+        if (!escaped) {
+            r.incomingLight += GetEnvironmentLight(r) * r.color;
+        }
+
         totalLight += r.incomingLight;
+
+
         
     }
 
-    
+
 
     float3 newSample = totalLight / float(RAYS_PER_PIXEL);
+
+    
 
 
     float3 prevAccum = accumImage[pixel].rgb;
     float3 accum = prevAccum + (newSample - prevAccum) / float(pc.accumCount);
+
+
+
+
 
     accumImage[pixel] = float4(accum, 1.0f);
     outputImage[pixel] = float4(accum, 1.0f);

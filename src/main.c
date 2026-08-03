@@ -10,6 +10,7 @@
 #define STB_DS_IMPLEMENTATION
 #include "stb_ds.h"
 
+#include "world.h"
 
 #define GLFW_INCLUDE_VULKAN
 #include "GLFW/glfw3.h"
@@ -20,8 +21,9 @@
 #include "display.h"
 #include "material.h" //material_list
 #include "model.h"
+#include "command.h"
 
-#include "world.h"
+void sun_command(void* context, int argc, char* argv[]);
 
 
 int main() {
@@ -32,17 +34,28 @@ int main() {
     Window_t window = window_create();
     Camera cam = camera_create(103.0f * (M_PI / 180.0f), (float)window.width / (float)window.height, &spawn, &inital_angle);
 
+	Commander cmd = commander_create();
+	command_register(&cmd, "tp", camera_teleport_command, &cam);
+
+	// must run before window_attach_device: createComputeBuffers sizes the GPU model
+	// voxel buffer from model_instance_list's contents at that point in time
+	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
+
 	window_attach_device(&window);
 
 	material_palette_create(); //dynamic for iterative purposes
 
-	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
+	window_model_buffer_load(&window, model_instance_list);
 
 
 	World wrld = world_create(67);
+	world_chunk_gen_workers_start(&wrld);
+	printf("loading spawn...\n");
 	world_load_spawn_chunk(&wrld);
+	printf("spawn loaded.\n");
+
     window_world_spawn_load(&window, &wrld);
-	
+
 
 	window_material_buffer_load(&window, material_list);
 	//window_model_buffer_load(&window, model_instance_list);
@@ -63,8 +76,11 @@ int main() {
 	const double fpsUpdateInterval = 0.2; // 5 Hz
 
 	Vector_t sun_direction = vector_create(0.318f, 0.848f, 0.424f);
+	command_register(&cmd, "sundir", sun_command, &sun_direction);
 
 	world_chunk_memory_queue(&wrld, &cam.pos);
+
+	commander_start(&cmd);
 
     while (!window_should_close(&window)) {
         window_poll_events(&window);
@@ -112,12 +128,25 @@ int main() {
 		}
 
 		window_world_chunk_streaming(&window, &wrld);
-		
+
 
         window_render(&window, &cam, sun_direction);
 
     }
 
+	commander_end(&cmd);
+
     window_close(&window);
     world_destroy(&wrld);
+}
+
+void sun_command(void* context, int argc, char* argv[]) {
+	Vector_t* direction = (Vector_t*)context;
+
+	if (argc != 4) {printf("usage: sundir <x> <y> <z>\n"); return;}
+
+	Vector_t new_direction = vector_create((float)atof(argv[1]), (float)atof(argv[2]), (float)atof(argv[3]));
+	if (vector_magnitude(&new_direction) == 0.0f) {printf("sundir: direction cannot be zero\n"); return;}
+
+	*direction = new_direction;
 }
