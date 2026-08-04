@@ -20,7 +20,7 @@ static Model_t create_cube_model(uint32_t dim[3], uint8_t material) {
         .up_axis = 0,
         .cardinal_axis = 0
     };
-    memcpy(model.dimensions, dim, sizeof(model.dimensions));
+    model.dimensions = uVector_create(dim[0], dim[1], dim[2]);
     memset(model.voxels, material, size);
 
     return model;
@@ -41,7 +41,7 @@ static Model_t create_sphere_model(uint32_t diameter, uint8_t material) {
         .up_axis = 0,
         .cardinal_axis = 0
     };
-    memcpy(model.dimensions, dim, sizeof(model.dimensions));
+    model.dimensions = uVector_create(dim[0], dim[1], dim[2]);
 
     float radius = diameter / 2.0f;
     float center = radius - 0.5f;
@@ -98,6 +98,12 @@ Model_t model_create_from_vox(const char* path, uint8_t up_axis, uint8_t cardina
     return vox_load_model(path, up_axis, cardinal_axis, material, colorMatch);
 }
 
+void model_free(Model_t* model) {
+    free(model->voxels);
+    model->voxels = NULL;
+    model->size = 0;
+}
+
 
 /*
 baked models ops
@@ -105,10 +111,11 @@ baked models ops
 */
 
 void model_scale_baked(Model_t* model, float scale) {
+    uint32_t dim[3] = { model->dimensions.x, model->dimensions.y, model->dimensions.z };
     uint32_t new_dim[3] = {
-        (uint32_t)ceilf(model->dimensions[0] * scale),
-        (uint32_t)ceilf(model->dimensions[1] * scale),
-        (uint32_t)ceilf(model->dimensions[2] * scale)
+        (uint32_t)ceilf(dim[0] * scale),
+        (uint32_t)ceilf(dim[1] * scale),
+        (uint32_t)ceilf(dim[2] * scale)
     };
     uint32_t new_size = new_dim[0] * new_dim[1] * new_dim[2];
     uint8_t* new_voxels = calloc(new_size, sizeof(uint8_t));
@@ -121,11 +128,11 @@ void model_scale_baked(Model_t* model, float scale) {
                     (uint32_t)(y / scale),
                     (uint32_t)(z / scale)
                 };
-                if (src[0] >= model->dimensions[0]) { src[0] = model->dimensions[0] - 1; }
-                if (src[1] >= model->dimensions[1]) { src[1] = model->dimensions[1] - 1; }
-                if (src[2] >= model->dimensions[2]) { src[2] = model->dimensions[2] - 1; }
+                if (src[0] >= dim[0]) { src[0] = dim[0] - 1; }
+                if (src[1] >= dim[1]) { src[1] = dim[1] - 1; }
+                if (src[2] >= dim[2]) { src[2] = dim[2] - 1; }
 
-                uint32_t src_idx = src[0] + src[1] * model->dimensions[0] + src[2] * model->dimensions[0] * model->dimensions[1];
+                uint32_t src_idx = src[0] + src[1] * dim[0] + src[2] * dim[0] * dim[1];
                 uint32_t dst_idx = x + y * new_dim[0] + z * new_dim[0] * new_dim[1];
                 new_voxels[dst_idx] = model->voxels[src_idx];
             }
@@ -135,7 +142,7 @@ void model_scale_baked(Model_t* model, float scale) {
     free(model->voxels);
     model->voxels = new_voxels;
     model->size = new_size;
-    memcpy(model->dimensions, new_dim, sizeof(new_dim));
+    model->dimensions = uVector_create(new_dim[0], new_dim[1], new_dim[2]);
 }
 
 void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis) {
@@ -165,7 +172,7 @@ void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis) 
     axis[sideModelAxis[1]] = sla[1];
     sign[sideModelAxis[1]] = ss[1];
 
-    uint32_t dim[3] = { model->dimensions[0], model->dimensions[1], model->dimensions[2] };
+    uint32_t dim[3] = { model->dimensions.x, model->dimensions.y, model->dimensions.z };
     uint32_t new_dim[3] = { dim[axis[0]], dim[axis[1]], dim[axis[2]] };
     uint32_t new_size = new_dim[0] * new_dim[1] * new_dim[2];
     uint8_t* new_voxels = calloc(new_size, sizeof(uint8_t));
@@ -191,7 +198,7 @@ void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis) 
     free(model->voxels);
     model->voxels = new_voxels;
     model->size = new_size;
-    memcpy(model->dimensions, new_dim, sizeof(new_dim));
+    model->dimensions = uVector_create(new_dim[0], new_dim[1], new_dim[2]);
     model->up_axis = up_axis;
     model->cardinal_axis = cardinal_axis;
 }

@@ -14,6 +14,9 @@
 //move these elsewhere later
 #define CHUNK_STREAM_COUNT (CHUNK_STREAM_WINDOW_XZ * CHUNK_STREAM_WINDOW_XZ * CHUNK_STREAM_WINDOW_Y)
 
+void region_free(Region* r);
+void chunk_region_structure_placements(WorldGenerator* gen, Chunk* chunk);
+
 double smoothstep(double a, double b, double x) {
     x = (x - a) / (b - a);
 
@@ -35,7 +38,7 @@ static int32_t wrap_axis(int32_t v, int32_t window) {
     return m < 0 ? m + window : m;
 }
 
-static iVector_t chunk_slot_key(iVector_t coord) {
+static iVector_t chunk_slot_key(iVector_t coord) { //combine this with slot_grid_index
     return iVector_create(
         wrap_axis(coord.x, CHUNK_STREAM_WINDOW_XZ),
         wrap_axis(coord.y, CHUNK_STREAM_WINDOW_Y),
@@ -172,9 +175,61 @@ WorldGenerator world_generator_create(uint32_t seed) {
     gen.ymap = ymap;
     gen.amplify = amp_pass;
 
+    gen.seed = seed;
+
+    gen.regions = NULL;
+
+    structure_list_create(gen.structure_list); //do this here could be to expensive but not for now
+
+
     return gen;
 }
 
+void world_generator_free(WorldGenerator* gen) {
+
+    for (uint32_t i= 0; i < hmlen(gen->regions); i++) {
+        region_free(&gen->regions[i].value);
+    }
+
+    for (uint32_t i = 0; i < STRUCTURE_COUNT; i++) { //might make dynamic later
+        model_free(&gen->structure_list[i].model);
+    }
+
+    hmfree(gen->regions);
+    gen->regions = NULL;
+}
+
+void region_spawn_generator(WorldGenerator* gen) {
+    const int radius = 2;
+    for (int x = -radius; x <= radius; x++) {
+        for (int z = -radius; z <= radius; z++) {
+            iVector_t region_coord = iVector_create(x, 0, z);
+            Region region = region_create(gen);
+            hmput(gen->regions, region_coord, region);
+        }
+    }
+}
+
+Region region_create(WorldGenerator* gen) {
+    Region r = {0};
+
+    r.structure_count = 1;
+    r.structures = calloc(r.structure_count, sizeof(Structure_t));
+
+    //for now copy structure_list[0] into region structure
+    memcpy(&r.structures[0], &gen->structure_list[3], sizeof(Structure_t));
+
+    r.structures[0].region_coords = uVector_create(200, 128, 200);
+    return r;
+}
+
+
+
+void region_free(Region* r) {
+    free(r->structures);
+    r->structures = NULL;
+    r->structure_count = 0;
+}
 
 
 World world_create(uint32_t seed) {
@@ -200,6 +255,8 @@ World world_create(uint32_t seed) {
 
 void world_load_spawn_chunk(World* wrld) {
     uint32_t total = 0;
+
+    region_spawn_generator(&wrld->generator);
 
     chunk_thread_pool_lock_jobs(&wrld->genPool);
     for (int x = -(CHUNK_STREAM_RADIUS_XZ >> 1); x < CHUNK_STREAM_RADIUS_XZ >> 1; x++) {
@@ -452,7 +509,7 @@ Chunk chunk_create(World* wrld, iVector_t coord) {
             uint32_t h = xz_hash(x, z, wrld->seed);
 
             int off = (h % 21) - 10;
-            int stone = 240 + off;
+            int stone = 220 + off;
             off = (~h % 21) - 10;
             int snow = 260 + off;
             int stone_start = stone - chunkBaseY;
@@ -488,7 +545,7 @@ Chunk chunk_create(World* wrld, iVector_t coord) {
                 if ((uint32_t)total_height <= wrld->generator.ymap.sea_level) {
                     chunk.voxels[topIdx] = SAND;
                 } else if (total_height < stone) {
-                    chunk.voxels[topIdx] = GRASS;
+                    chunk.voxels[topIdx] = total_height < stone - 1 ? GRASS : DIRT;
                 } else if (total_height < snow) {
                     chunk.voxels[topIdx] = STONE;
                 } else {
@@ -498,6 +555,8 @@ Chunk chunk_create(World* wrld, iVector_t coord) {
 
 		}
 	}
+
+    chunk_region_structure_placements(&wrld->generator, &chunk);
 
 	return chunk;
 }
@@ -517,62 +576,117 @@ void world_destroy(World* wrld) {
 
     q_unalloc(&wrld->chunk_load_queue);
     q_unalloc(&wrld->chunk_rmf_queue);
+
+    world_generator_free(&wrld->generator);
+}
+
+
+void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin) {
+    iVector_t region_coord = iVector_create(origin.x >> REGION_DIM_SHIFT, 0 , origin.z >> REGION_DIM_SHIFT);
+    uVector_t region_rel_coord = uVector_create(
+        (uint32_t)wrap_axis(origin.x, 1 << REGION_DIM_SHIFT),
+        (uint32_t)origin.y,
+        (uint32_t)wrap_axis(origin.z, 1 << REGION_DIM_SHIFT)
+    );
+    WorldGenerator* gen = &wrld->generator;
+
+    if (hmgeti(gen->regions, region_coord) == -1) {
+        Region r = region_create(gen);
+        hmput(gen->regions, region_coord, r);
+    }
+
+    int idx = hmgeti(gen->regions, region_coord);
+    Region* r = &gen->regions[idx].value;
+
+    Structure_t* update = malloc((r->structure_count + 1) * sizeof(Structure_t));
+    memcpy(update, r->structures, r->structure_count * sizeof(Structure_t));
+    memcpy(&update[r->structure_count], &gen->structure_list[type], sizeof(Structure_t));
+    free(r->structures);
+    r->structures = update;
+
+    r->structures[r->structure_count].region_coords = region_rel_coord;
+    r->structure_count++;
+}
+
+void chunk_region_structure_placements(WorldGenerator* gen, Chunk* chunk) {
+    iVector_t region_coord = iVector_create(chunk->coord.x >> REGION_CHUNK_SHIFT, 0 , chunk->coord.z >> REGION_CHUNK_SHIFT);
+    int idx = hmgeti(gen->regions, region_coord);
+    if (idx != -1) {
+        Region* r = &gen->regions[idx].value;
+
+        for (uint32_t i = 0; i < r->structure_count; i++) {
+            Structure_t* s = &r->structures[i];
+            uVector_t model_dim = s->model.dimensions;
+
+            uVector_t smin = s->region_coords;
+            uVector_t smax = uVector_add(&smin, &model_dim);
+
+            uint32_t local_chunk_x = (uint32_t)wrap_axis(chunk->coord.x, 1 << REGION_CHUNK_SHIFT);
+            uint32_t local_chunk_z = (uint32_t)wrap_axis(chunk->coord.z, 1 << REGION_CHUNK_SHIFT);
+
+            uVector_t cmin = uVector_create(local_chunk_x * CHUNK_DIM, (uint32_t)chunk->coord.y * CHUNK_DIM, local_chunk_z * CHUNK_DIM);
+            uVector_t cmax = uVector_create(cmin.x + CHUNK_DIM, cmin.y + CHUNK_DIM, cmin.z + CHUNK_DIM);
+
+            if (smax.x < cmin.x || smin.x > cmax.x) continue;
+            if (smax.y < cmin.y || smin.y > cmax.y) continue;
+            if (smax.z < cmin.z || smin.z > cmax.z) continue;
+
+            //clamp aabb to same region
+            uVector_t ovlp_min = uVector_create(
+                smin.x > cmin.x ? smin.x : cmin.x,
+                smin.y > cmin.y ? smin.y : cmin.y,
+                smin.z > cmin.z ? smin.z : cmin.z
+            );
+            uVector_t ovlp_max = uVector_create(
+                smax.x < cmax.x ? smax.x : cmax.x,
+                smax.y < cmax.y ? smax.y : cmax.y,
+                smax.z < cmax.z ? smax.z : cmax.z
+            );
+
+            for (uint32_t wz = ovlp_min.z; wz < ovlp_max.z; wz++) {
+                for (uint32_t wy = ovlp_min.y; wy < ovlp_max.y; wy++) {
+                    for (uint32_t wx = ovlp_min.x; wx < ovlp_max.x; wx++) {
+                        uint32_t struct_idx = (wx - smin.x) + (wy - smin.y) * model_dim.x + (wz - smin.z) * model_dim.x * model_dim.y;
+                        uint8_t voxel = s->model.voxels[struct_idx];
+                        if (voxel == AIR) { continue; }
+
+                        uint32_t chunk_idx = (wx - cmin.x) + (wy - cmin.y) * CHUNK_DIM + (wz - cmin.z) * CHUNK_DIM * CHUNK_DIM;
+                        chunk->voxels[chunk_idx] = voxel;
+                    }
+                }
+            }
+        }
+
+
+    } 
+    else {
+        //handle generating new region? //could cause race conditions with multiple threads?
+    }
+
 }
 
 
 
-/*
-
 static Structure_t create_cube_structure(uint32_t dim[3], uint8_t material) {
-    uint32_t size = dim[0] * dim[1] * dim[2];
-
-    Structure_t structure = {
-        .size = size,
-        .voxels = calloc(size, sizeof(uint8_t))
-    };
-    memcpy(structure.dimensions, dim, sizeof(structure.dimensions));
-    memset(structure.voxels, material, size);
-
+    Structure_t structure = {0};
+    structure.model = model_create_prefab(CUBE, 0, 0, dim, &material, NULL);
     return structure;
 }
 
 static Structure_t create_plane_structure(uint32_t width, uint32_t depth, uint8_t material) {
-    uint32_t dim[3] = {width, 1, depth};
-    return create_cube_structure(dim, material);
+    Structure_t structure = {0};
+    structure.model = model_create_prefab(PLANE, 0, 0, &width, &depth, &material);
+    return structure;
 }
 
 static Structure_t create_sphere_structure(uint32_t diameter, uint8_t material) {
-    uint32_t dim[3] = {diameter, diameter, diameter};
-    uint32_t voxel_count = dim[0] * dim[1] * dim[2];
-
-    Structure_t structure = {
-        .size = voxel_count,
-        .voxels = calloc(voxel_count, sizeof(uint8_t))
-    };
-    memcpy(structure.dimensions, dim, sizeof(structure.dimensions));
-
-    float radius = diameter / 2.0f;
-    float center = radius - 0.5f; 
-
-    for (uint32_t z = 0; z < diameter; z++) {
-        for (uint32_t y = 0; y < diameter; y++) {
-            for (uint32_t x = 0; x < diameter; x++) {
-                float dx = (float)x - center;
-                float dy = (float)y - center;
-                float dz = (float)z - center;
-                if (dx * dx + dy * dy + dz * dz <= radius * radius) {
-                    uint32_t idx = x + y * dim[0] + z * dim[0] * dim[1];
-                    structure.voxels[idx] = material;
-                }
-            }
-        }
-    }
-
+    Structure_t structure = {0};
+    structure.model = model_create_prefab(SPHERE, 0, 0, &diameter, &material, NULL);
     return structure;
 }
 
 
-void structure_list_create() {
+void structure_list_create(Structure_t* structure_list) {
     uint32_t light_cube_dim[3] = {2, 2, 2};
 
     structure_list[MIRROR_PLANE] = create_plane_structure(50, 50, MIRROR);
@@ -580,164 +694,13 @@ void structure_list_create() {
     structure_list[MIRROR_BALL] = create_sphere_structure(40, MIRROR);
     structure_list[RUBY_BALL] = create_sphere_structure(30, RUBY);
     structure_list[LIGHT_CUBE] = create_cube_structure(light_cube_dim, YELLOW_LIGHT);
-    structure_list[CASTLE] = structure_load_vox("./res/models/castle.vox", COPPER, false);
-    structure_list[STATUE] = structure_load_vox("./res/models/sculpt2.vox", MARBLE, false);
-    structure_list[BOAT] = structure_load_vox("./res/models/boat.vox",  AIR, true);
-    structure_list[TREE] = structure_load_vox("./res/models/tree.vox", AIR, true);
-    structure_list[SHIMMER] = structure_load_vox("./res/models/bronze.vox", COPPER, false);
-    structure_list[CUTE] = structure_load_vox("./res/models/cute.vox", COPPER, true);
-    structure_list[OUT] = structure_load_vox("./res/models/out.vox", COPPER, true);
+    structure_list[CASTLE].model = model_create_from_vox("./res/models/castle.vox", 0, 0, COPPER, false);
+    structure_list[STATUE].model = model_create_from_vox("./res/models/sculpt2.vox", 0, 0, MARBLE, false);
+    structure_list[BOAT].model = model_create_from_vox("./res/models/boat.vox", 0, 0, AIR, true);
+    structure_list[TREE].model = model_create_from_vox("./res/models/tree.vox", 0, 0, AIR, true);
+    structure_list[SHIMMER].model = model_create_from_vox("./res/models/bronze.vox", 0, 0, COPPER, false);
+    structure_list[CUTE].model = model_create_from_vox("./res/models/cute.vox", 0, 0, COPPER, true);
+    structure_list[OUT].model = model_create_from_vox("./res/models/out.vox", 0, 0, COPPER, true);
 }
-
-
-void world_structure_place(World* wrld, StructureTypes type, uint32_t origin[3], uint32_t normal, uint32_t rotation, float scale, bool overwrite) {
-
-    uint32_t dim[3] = {structure_list[type].dimensions[0], structure_list[type].dimensions[1], structure_list[type].dimensions[2]};
-
-
-    static const int normalAxis[6] = {1, 1, 0, 0, 2, 2}; // which world axis carries local Y
-    static const int normalSign[6] = {1, -1, 1, -1, 1, -1};
-
-    int axis[3];
-    int sign[3];
-
-    int nAxis = normalAxis[normal % 6];
-    axis[nAxis] = 1; // local Y -> the normal's world axis
-    sign[nAxis] = normalSign[normal % 6];
-
-
-    int sideWorldAxis[2];
-    int sideCount = 0;
-    for (int w = 0; w < 3; w++) {
-        if (w != nAxis) { sideWorldAxis[sideCount++] = w; }
-    }
-
-
-    static const int spinLocalAxis[4][2] = { {0, 2}, {2, 0}, {0, 2}, {2, 0} };
-    static const int spinSign[4][2] = { {1, 1}, {-1, 1}, {-1, -1}, {1, -1} };
-    const int* sla = spinLocalAxis[rotation % 4];
-    const int* ss = spinSign[rotation % 4];
-
-    axis[sideWorldAxis[0]] = sla[0];
-    sign[sideWorldAxis[0]] = ss[0];
-    axis[sideWorldAxis[1]] = sla[1];
-    sign[sideWorldAxis[1]] = ss[1];
-
-    uint32_t scaled_dim[3] = {
-        (uint32_t)ceilf(dim[axis[0]] * scale),
-        (uint32_t)ceilf(dim[axis[1]] * scale),
-        (uint32_t)ceilf(dim[axis[2]] * scale)
-    };
-
-    uint32_t outer_dim[3] = {scaled_dim[0] + origin[0], scaled_dim[1] + origin[1], scaled_dim[2] + origin[2]};
-
-    if (outer_dim[0] > wrld->dimensions[0] || outer_dim[1] > wrld->dimensions[1] || outer_dim[2] > wrld->dimensions[2]) {
-        printf("Cant place Structure\n");
-        return;
-    }
-
-    for (uint32_t x = origin[0]; x < outer_dim[0]; x++) {
-        for (uint32_t y = origin[1]; y < outer_dim[1]; y++) {
-            for (uint32_t z = origin[2]; z < outer_dim[2]; z++) {
-                uint32_t local[3] = {
-                    (uint32_t)((x - origin[0]) / scale),
-                    (uint32_t)((y - origin[1]) / scale),
-                    (uint32_t)((z - origin[2]) / scale)
-                };
-
-                uint32_t src[3];
-                for (int w = 0; w < 3; w++) {
-                    uint32_t axisDim = dim[axis[w]];
-                    src[axis[w]] = (sign[w] > 0) ? local[w] : (axisDim - 1 - local[w]);
-                }
-
-                if (src[0] >= dim[0]) { src[0] = dim[0] - 1; }
-                if (src[1] >= dim[1]) { src[1] = dim[1] - 1; }
-                if (src[2] >= dim[2]) { src[2] = dim[2] - 1; }
-
-                uint32_t world_idx = x + y * wrld->dimensions[0] + z * wrld->dimensions[0] * wrld->dimensions[1];
-                uint32_t struct_idx = src[0] + src[1] * dim[0] + src[2] * dim[0] * dim[1];
-
-                if (wrld->voxels[world_idx] == 0 || overwrite) {
-                    wrld->voxels[world_idx] = structure_list[type].voxels[struct_idx];
-                }   
-            }
-        }
-    }
-
-}
-
-void world_generate_structures(World* wrld) {
-    uint32_t seed = wrld->seed;
-    srand(seed);
-
-    uint32_t* ymap = wrld->hieght_map;
-
-    for (uint32_t x = 0; x < wrld->dimensions[0]; x++) {
-        for (uint32_t z = 0; z < wrld->dimensions[2]; z++) {
-            rand();
-            rand();
-            rand();
-            if (!rand() % 25000) {
-                uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 10;
-                uint32_t origin[3] = {x, y, z};
-                world_structure_place(wrld, (StructureTypes)MIRROR_BALL, origin, 0, 0, (float)(rand() % 6) * 0.1f + 0.5f, true);
-            }
-
-            if (!rand() % 20000) {
-                uint32_t y = ymap[x + z * wrld->dimensions[1]] + rand() % 50 + 4;
-                uint32_t origin[3] = {x, y, z};
-                world_structure_place(wrld, (StructureTypes)RUBY_BALL, origin, 0, 0, (float)(rand() % 8) * 0.1f + 0.3f, false);
-            }
-
-            if (!rand() % 2000) {
-
-                uint32_t y = ymap[x + z * wrld->dimensions[1]]+1;
-                uint32_t origin[3] = {x, y, z};
-                //world_structure_place(wrld, (StructureTypes)LIGHT_CUBE, origin, 0, 0, 1.0f, true);
-
-            }
-
-            if (!rand() % 800) {
-                uint32_t y = ymap[x + z * wrld->dimensions[1]];
-                uint32_t origin[3] = {x, y-2, z};
-                if (y > wrld->perlin_params.sea_level) {
-                    world_structure_place(wrld, (StructureTypes)TREE, origin, 0, rand() % 4, 2.0f, false);
-                }
-
-            }
-        }
-    }
-
-    uint32_t mp_origin[3] = {wrld->dimensions[0] / 2, wrld->dimensions[1] * 0.55f, wrld->dimensions[2] / 2};
-    //world_structure_place(wrld, (StructureTypes)MIRROR_PLANE, mp_origin, 2, 0, 1.0f, true); // facing +X, stands it up as a wall
-
-    //uint32_t vp_origin[3] = {wrld->dimensions[0] / 2, wrld->dimensions[1] * 0.55f, wrld->dimensions[2] / 3};
-    //world_structure_place(wrld, (StructureTypes)VARNISH_PLANE, vp_origin, 0, 0, 1.0f, true);
-
-    uint32_t castle_origin[3] = {wrld->dimensions[0] * 0.7f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.7f};
-    world_structure_place(wrld, (StructureTypes)CASTLE, castle_origin, 0, 0, 4.0f, false);
-
-    uint32_t statue_origin[3] = {wrld->dimensions[0] * 0.2f, wrld->dimensions[1] * 0.52f, wrld->dimensions[2] * 0.2f};
-    world_structure_place(wrld, (StructureTypes)STATUE, statue_origin, 0, 2, 1.0f, false);
-
-    uint32_t boat_origin[3] = {wrld->dimensions[0] * 0.6f, wrld->dimensions[1] * 0.48f, wrld->dimensions[2] * 0.22f};
-    world_structure_place(wrld, (StructureTypes)BOAT, boat_origin, 0, 0, 1.0f, false);
-
-    uint32_t shimmer_origin[3] = {wrld->dimensions[0] * 0.3f, wrld->dimensions[1] * 0.45f, wrld->dimensions[2] * 0.7f};
-    shimmer_origin[1] = ymap[shimmer_origin[0] + shimmer_origin[2] * wrld->dimensions[1]];
-    //world_structure_place(wrld, (StructureTypes)SHIMMER, shimmer_origin, 0, 1, 1.0f, false);
-
-    uint32_t out_origin[3] = {wrld->dimensions[0] * 0.17f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.82f};
-    out_origin[1] = ymap[out_origin[0] + out_origin[2] * wrld->dimensions[1]];
-    world_structure_place(wrld, (StructureTypes)OUT, out_origin, 0, 0, 1.0f, false);
-
-    uint32_t cute_origin[3] = {wrld->dimensions[0] * 0.45f, wrld->dimensions[1] * 0.5f, wrld->dimensions[2] * 0.6f};
-    cute_origin[1] = ymap[cute_origin[0] + cute_origin[2] * wrld->dimensions[1]];
-    //world_structure_place(wrld, (StructureTypes)CUTE, cute_origin, 0, 1, 1.0f, false);
-
-}
-
-*/
 
 

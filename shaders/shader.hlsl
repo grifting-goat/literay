@@ -81,6 +81,7 @@ static const float MAX_TOTAL_DISTANCE = MAX_RAY_DISTANCE * 2.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 static const uint MAX_BONUS_BOUNCES = 3;
+static const float FIREFLY_CLAMP = 10.0f;
 
 static const uint BRICK_SIZE = 8;
 static const uint BRICK_SIZE_SHIFT = 3; // log2(BRICK_SIZE)
@@ -97,7 +98,7 @@ static const int CHUNK_STREAM_WINDOW_BRICKS_Y = CHUNK_STREAM_WINDOW_VOXELS_Y / i
 static const int CHUNK_STREAM_WINDOW_CHUNKS_XZ = CHUNK_STREAM_WINDOW_BRICKS_XZ / BRICKS_PER_CHUNK_AXIS;
 static const int CHUNK_STREAM_WINDOW_CHUNKS_Y = CHUNK_STREAM_WINDOW_BRICKS_Y / BRICKS_PER_CHUNK_AXIS;
 
-static const float DENSITY = 0.001f;
+static const float DENSITY = 0.0f;//0.001f;
 
 int3 WrapCoord3Aniso(int3 v, int nXZ, int nY) {
     int3 n = int3(nXZ, nY, nXZ);
@@ -106,8 +107,18 @@ int3 WrapCoord3Aniso(int3 v, int nXZ, int nY) {
 }
 
 static const bool EnvironmentEnabled = true;
-static const float3 SkyColourHorizon = float3(0.8f, 0.9f, 1.0f);
-static const float3 SkyColourZenith = float3(0.2f, 0.4f, 0.9f);
+
+
+static const float3 NightSkyColourHorizon = float3(0.02f, 0.02f, 0.05f);
+static const float3 NightSkyColourZenith  = float3(0.0f, 0.0f, 0.015f);
+static const float3 DuskSkyColourHorizon  = float3(1.0f, 0.5f, 0.3f);
+static const float3 DuskSkyColourZenith   = float3(0.3f, 0.25f, 0.45f);
+static const float3 DaySkyColourHorizon   = float3(0.8f, 0.9f, 1.0f);
+static const float3 DaySkyColourZenith    = float3(0.2f, 0.4f, 0.9f);
+
+static const float3 SunColourDusk = float3(1.0f, 0.4f, 0.2f);
+static const float3 SunColourDay  = float3(1.0f, 1.0f, 0.95f);
+
 static const float SunFocus = 500.0f;
 static const float SunIntensity = 0.5f;
 
@@ -150,7 +161,7 @@ uint HashVoxelCell(int3 cell) {
     return NextRandom(seed);
 }
 
-// Uniform direction on the unit sphere 
+// Uniform direction on the unit sphere
 float3 RandomDirection(inout uint state) {
     float z = 1.0f - 2.0f * RandomValue(state);
     float phi = 6.2831853f * RandomValue(state);
@@ -158,6 +169,33 @@ float3 RandomDirection(inout uint state) {
     float s, c;
     sincos(phi, s, c);
     return float3(r * c, r * s, z);
+}
+
+
+void BuildONB(float3 n, out float3 t, out float3 b) {
+    float sign = n.z >= 0.0f ? 1.0f : -1.0f;
+    float a = -1.0f / (sign + n.z);
+    float c = n.x * n.y * a;
+    t = float3(1.0f + sign * n.x * n.x * a, sign * c, -sign * n.x);
+    b = float3(c, sign + n.y * n.y * a, -n.y);
+}
+
+
+float3 CosineWeightedHemisphereSample(inout uint state) {
+    float u1 = RandomValue(state);
+    float u2 = RandomValue(state);
+    float r = sqrt(u1);
+    float phi = 6.2831853f * u2;
+    float s, c;
+    sincos(phi, s, c);
+    return float3(r * c, r * s, sqrt(max(0.0f, 1.0f - u1)));
+}
+
+float3 CosineWeightedDirection(float3 normal, inout uint state) {
+    float3 t, b;
+    BuildONB(normal, t, b);
+    float3 local = CosineWeightedHemisphereSample(state);
+    return normalize(t * local.x + b * local.y + normal * local.z);
 }
 
 Ray CreateRay(float3 origin, float3 direction) {
@@ -232,7 +270,8 @@ int3 SnapEntryCell(int3 floorCell, int3 cellMin, int3 cellMax, float3 normal) {
 
 
 //https://github.com/SebLague/Ray-Tracing
-float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time of day
+/*
+float3 GetEnvironmentLight(Ray ray) {
 
     if (!EnvironmentEnabled) {return 0;}
 
@@ -247,10 +286,37 @@ float3 GetEnvironmentLight(Ray ray) { //replce with skybox or upgrad with time o
 
     return skyGradient + sun;
 }
+*/
+
+float3 GetEnvironmentLight(Ray ray) { 
+
+    if (!EnvironmentEnabled) {return AmbientLight;}
+
+    float elevation = pc.sun_direction.y;
+    float tNightToDusk = smoothstep(-0.2f, 0.0f, elevation);
+    float3 horizonNightDusk = lerp(NightSkyColourHorizon, DuskSkyColourHorizon, tNightToDusk);
+    float3 zenithNightDusk = lerp(NightSkyColourZenith, DuskSkyColourZenith, tNightToDusk);
+
+    float tDuskToDay = smoothstep(0.0f, 0.25f, elevation);
+    float3 horizonColor = lerp(horizonNightDusk, DaySkyColourHorizon, tDuskToDay);
+    float3 zenithColor = lerp(zenithNightDusk, DaySkyColourZenith, tDuskToDay);
+
+    float sunVisibility = smoothstep(-0.05f, 0.05f, elevation);
+    float3 sunColor = lerp(SunColourDusk, SunColourDay, smoothstep(0.0f, 0.3f, elevation));
+
+    if (ray.direction.y <= 0.0f) {
+        float voidT = smoothstep(-0.4f, 0.0f, ray.direction.y);
+        return horizonColor * voidT;
+    }
+
+    float skyGradientT = pow(smoothstep(0, 0.4, ray.direction.y), 0.35);
+    float3 skyGradient = lerp(horizonColor, zenithColor, skyGradientT);
+    float sun = pow(max(0, dot(ray.direction, pc.sun_direction)), SunFocus) * SunIntensity * sunVisibility;
+
+    return skyGradient + sun * sunColor;
+}
 
 
-
-// dynamic/entity path temporarily disabled while the static path is rewritten for the brick atlas
 
 uint ReadModelVoxel(uint index) {
     uint word = modelVoxelsIn.Load(index & ~3u);
@@ -576,7 +642,7 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 trackViewDist = isSpecular;
                 bonus = min(bonus + (uint)isSpecular, MAX_BONUS_BOUNCES);
 
-                float3 diffuseDir = normalize(hit.normal + RandomDirection(rngState));
+                float3 diffuseDir = CosineWeightedDirection(hit.normal, rngState);
                 float3 specularDir = Reflect(r.direction, hit.normal);
 
                 r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
@@ -603,6 +669,12 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
             r.incomingLight += GetEnvironmentLight(r) * r.color;
         }
 
+
+        float sampleLuma = dot(r.incomingLight, float3(0.2126f, 0.7152f, 0.0722f));
+        if (sampleLuma > FIREFLY_CLAMP) {
+            r.incomingLight *= FIREFLY_CLAMP / sampleLuma;
+        }
+
         totalLight += r.incomingLight;
 
 
@@ -613,17 +685,50 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
     float3 newSample = totalLight / float(RAYS_PER_PIXEL);
 
-    
-
-
     float3 prevAccum = accumImage[pixel].rgb;
     float3 accum = prevAccum + (newSample - prevAccum) / float(pc.accumCount);
-
-
-
-
 
     accumImage[pixel] = float4(accum, 1.0f);
     outputImage[pixel] = float4(accum, 1.0f);
 
 }
+
+// blue-noise sampling experiment (R2 low-discrepancy sequence, IGN-seeded, golden-ratio/R2
+
+// static const float2 R2_STEP = float2(0.7548776662f, 0.5698402909f);
+//
+// // per-pixel spatial seed; static across frames on its own, animated below via a
+// // golden-ratio rotation so it doesn't leave a fixed dither pattern baked into the image
+// float InterleavedGradientNoise(float2 px) {
+//     return frac(52.9829189f * frac(dot(px, float2(0.06711056f, 0.00583715f))));
+// }
+//
+// // blue-noise-flavoured replacement for RandomValue: a per-pixel IGN seed walked along a
+// // low-discrepancy sequence (one step per call = one sampling dimension), instead of an
+// // uncorrelated white-noise hash. Spreads error as blue noise in screen space rather than
+// // white noise, without needing a precomputed blue-noise texture.
+// float2 NextBlueNoise2(inout float2 state) {
+//     state = frac(state + R2_STEP);
+//     return state;
+// }
+//
+// // scalar draws (distScatter, specular decision, ...) just take one component of a 2D step
+// float NextBlueNoise(inout float2 state) {
+//     return NextBlueNoise2(state).x;
+// }
+//
+// float3 RandomDirectionBlue(inout float2 state) {
+//     // both components come from the SAME 2D step, not two sequential 1D draws -- that's
+//     // what keeps this from tracing a spiral (see R2_STEP comment above)
+//     float2 u = NextBlueNoise2(state);
+//     float z = 1.0f - 2.0f * u.x;
+//     float phi = 6.2831853f * u.y;
+//     float r = sqrt(max(0.0f, 1.0f - z * z));
+//     float s, c;
+//     sincos(phi, s, c);
+//     return float3(r * c, r * s, z);
+// }
+//
+// // seeding used in main() before the sample loop:
+// // float2 blueState = frac(float2(InterleavedGradientNoise(float2(pixel)), InterleavedGradientNoise(float2(pixel) + 71.0f))
+// //     + R2_STEP * float(pc.frame_idx % 4096u));

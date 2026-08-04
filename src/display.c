@@ -176,9 +176,9 @@ void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 	entity->modelIdx = 0;
 
 	Model_t* model = &model_instance_list[entity->modelIdx];
-	float dimX = (float)model->dimensions[0];
-	float dimY = (float)model->dimensions[1];
-	float dimZ = (float)model->dimensions[2];
+	float dimX = (float)model->dimensions.x;
+	float dimY = (float)model->dimensions.y;
+	float dimZ = (float)model->dimensions.z;
 
 	entity->scale = 4.0f / dimY;
 	entity->position[1] -= 3.0f;
@@ -216,9 +216,9 @@ void window_test_entity_upload(Window_t* window) {
 
 		
 		Model_t* model = &model_instance_list[entity->modelIdx];
-		float dimX = (float)model->dimensions[0];
-		float dimY = (float)model->dimensions[1];
-		float dimZ = (float)model->dimensions[2];
+		float dimX = (float)model->dimensions.x;
+		float dimY = (float)model->dimensions.y;
+		float dimZ = (float)model->dimensions.z;
 
 		entity->scale = ((float)(rand() % 10) * 0.5f + 1.0f) / dimY;
 		entity->position[1] -= 3.0f;
@@ -1720,10 +1720,6 @@ void window_world_chunk_occupancy_mask_upload(Window_t* window, World* wrld, Chu
 	to_transfer.srcAccessMask = 0;
 	to_transfer.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
 	to_transfer.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-	// must be SHADER_READ_ONLY_OPTIMAL, not UNDEFINED: this runs every frame that streams in new
-	// chunks anywhere in the world, and UNDEFINED tells the driver the WHOLE image's prior contents
-	// (every other already-loaded chunk's occupancy data, not just this batch's regions) don't need
-	// preserving -- this was silently corrupting/discarding earlier-loaded chunks' geometry.
 	to_transfer.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
 	to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -2089,10 +2085,6 @@ void window_world_chunk_streaming(Window_t* window, World* wrld) {
 		Chunk chunk;
 		if (!world_chunk_gen_poll(wrld, &chunk)) { break; }
 
-
-		// gen jobs survive queue rebuilds, so results can arrive for coords that left the
-		// window (or duplicates of ones already loaded); inserting those would evict the
-		// correct current owner of the slot they alias
 		int32_t sdx = chunk.coord.x - wrld->stream_center.x;
 		int32_t sdy = chunk.coord.y - wrld->stream_center.y;
 		int32_t sdz = chunk.coord.z - wrld->stream_center.z;
@@ -2225,7 +2217,7 @@ void window_model_buffer_load(Window_t* window, Model_t* model_list) {
 	VkDeviceSize total_voxels_size = 0;
 	for (uint32_t i = 0; i < MAX_MODELS; i++) {
 		printf("model[%u]: dims=(%u,%u,%u) size=%u voxels=%p\n", i,
-			model_list[i].dimensions[0], model_list[i].dimensions[1], model_list[i].dimensions[2],
+			model_list[i].dimensions.x, model_list[i].dimensions.y, model_list[i].dimensions.z,
 			model_list[i].size, (void*)model_list[i].voxels);
 		total_voxels_size += model_list[i].size;
 	}
@@ -2244,9 +2236,9 @@ void window_model_buffer_load(Window_t* window, Model_t* model_list) {
 
 		gpu_models[i].voxelOffset = offset;
 		gpu_models[i].axes = (uint32_t)model->up_axis | ((uint32_t)model->cardinal_axis << 8);
-		gpu_models[i].dimensions[0] = model->dimensions[0];
-		gpu_models[i].dimensions[1] = model->dimensions[1];
-		gpu_models[i].dimensions[2] = model->dimensions[2];
+		gpu_models[i].dimensions[0] = model->dimensions.x;
+		gpu_models[i].dimensions[1] = model->dimensions.y;
+		gpu_models[i].dimensions[2] = model->dimensions.z;
 		gpu_models[i].size = model->size;
 
 		if (model->size > 0 && model->voxels != NULL) {
@@ -2569,6 +2561,8 @@ void createChunkStreamResources(Window_t* window) {
 	}
 
 	// atlas upload ring; sized for the worst case where every brick in every chunk of the batch is solid
+
+	//eventually make this sized for avg case maybe 40% of max, then dynamically allocate if thats ever exceded
 	uint32_t atlasMaxBrickSlots = CHUNK_STREAM_BATCH_SIZE * bricksPerChunk;
 	for (uint32_t i = 0; i < CHUNK_STREAM_RING_DEPTH; i++) {
 		AtlasStreamSlot_t* slot = &window->vk_objects.atlasStreamSlots[i];

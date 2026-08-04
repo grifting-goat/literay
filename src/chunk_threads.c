@@ -108,9 +108,7 @@ bool chunk_thread_pool_poll(ChunkThreadPool_t* pool, Chunk* outChunk) {
 
 void chunk_thread_pool_poll_blocking(ChunkThreadPool_t* pool, Chunk* outChunk) {
     EnterCriticalSection(&pool->resultLock);
-    while (q_emtpy(&pool->resultQueue)) {
-        SleepConditionVariableCS(&pool->resultCond, &pool->resultLock, INFINITE);
-    }
+    while (q_emtpy(&pool->resultQueue)) {SleepConditionVariableCS(&pool->resultCond, &pool->resultLock, INFINITE);}
     q_pop(&pool->resultQueue, outChunk);
     LeaveCriticalSection(&pool->resultLock);
 }

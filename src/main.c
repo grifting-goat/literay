@@ -37,11 +37,9 @@ int main() {
 	Commander cmd = commander_create();
 	command_register(&cmd, "tp", camera_teleport_command, &cam);
 
-	// must run before window_attach_device: createComputeBuffers sizes the GPU model
-	// voxel buffer from model_instance_list's contents at that point in time
-	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true);
 
-	window_attach_device(&window);
+	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true); 
+	window_attach_device(&window); //fix the ordering bug here
 
 	material_palette_create(); //dynamic for iterative purposes
 
@@ -54,7 +52,12 @@ int main() {
 	world_load_spawn_chunk(&wrld);
 	printf("spawn loaded.\n");
 
+
     window_world_spawn_load(&window, &wrld);
+
+	structure_manual_place(&wrld, CASTLE, iVector_create(10000, 128, -2000));
+	structure_manual_place(&wrld, BOAT, iVector_create(350, 124, 200));
+
 
 
 	window_material_buffer_load(&window, material_list);
@@ -73,6 +76,8 @@ int main() {
     double lastFrameTime = glfwGetTime();
     double fpsTimer = 0.0;
 	int fpsFrameCount = 0;
+	double cpuTimeAccumMs = 0.0;
+	double gpuTimeAccumMs = 0.0;
 	const double fpsUpdateInterval = 0.2; // 5 Hz
 
 	Vector_t sun_direction = vector_create(0.318f, 0.848f, 0.424f);
@@ -83,23 +88,13 @@ int main() {
 	commander_start(&cmd);
 
     while (!window_should_close(&window)) {
+        double cpuFrameStart = glfwGetTime();
         window_poll_events(&window);
 
 
         double currentFrameTime = glfwGetTime();
         float frameTime = (float)(currentFrameTime - lastFrameTime);
         lastFrameTime = currentFrameTime;
-
-        fpsTimer += frameTime;
-		fpsFrameCount++;
-		if (fpsTimer >= fpsUpdateInterval) {
-			double fps = (double)fpsFrameCount / fpsTimer;
-			double avgFrameTimeMs = (fpsTimer / fpsFrameCount) * 1000.0;
-			printf("\rFPS: %6.1f | frame time: %6.3f ms | pos: (%.1f, %.1f, %.1f)", fps, avgFrameTimeMs, cam.pos.x, cam.pos.y, cam.pos.z);
-			fflush(stdout);
-			fpsTimer = 0.0;
-			fpsFrameCount = 0;
-		}
 
         double mouseX, mouseY;
 		glfwGetCursorPos(window.glfw_window, &mouseX, &mouseY);
@@ -129,8 +124,26 @@ int main() {
 
 		window_world_chunk_streaming(&window, &wrld);
 
-
         window_render(&window, &cam, sun_direction);
+		double cpuFrameMs = (glfwGetTime() - cpuFrameStart) * 1000.0;
+		double gpuRenderMs = fmax(0.0, (double)frameTime * 1000.0 - cpuFrameMs);
+
+		fpsTimer += frameTime;
+		fpsFrameCount++;
+		cpuTimeAccumMs += cpuFrameMs;
+		gpuTimeAccumMs += gpuRenderMs;
+		if (fpsTimer >= fpsUpdateInterval) {
+			double fps = (double)fpsFrameCount / fpsTimer;
+			double avgFrameTimeMs = (fpsTimer / fpsFrameCount) * 1000.0;
+			double avgCpuMs = cpuTimeAccumMs / fpsFrameCount;
+			double avgGpuMs = gpuTimeAccumMs / fpsFrameCount;
+			printf("\rFPS: %6.1f | frame: %6.3f ms | cpu: %6.3f ms | approx gpu: %6.3f ms | pos: (%.1f, %.1f, %.1f)", fps, avgFrameTimeMs, avgCpuMs, avgGpuMs, cam.pos.x, cam.pos.y, cam.pos.z);
+			fflush(stdout);
+			fpsTimer = 0.0;
+			fpsFrameCount = 0;
+			cpuTimeAccumMs = 0.0;
+			gpuTimeAccumMs = 0.0;
+		}
 
     }
 

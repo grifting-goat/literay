@@ -9,16 +9,12 @@
 #include "queue.h"
 #include "chunk_threads.h"
 
+#include "model.h"
+
 
 #define CHUNK_DIM 32
 #define CHUNK_SIZE CHUNK_DIM * CHUNK_DIM * CHUNK_DIM
 
-// CHUNK_STREAM_RADIUS_XZ must produce a power-of-2 CHUNK_STREAM_WINDOW_XZ. Non-power-of-2 3D
-// texture dimensions (44 was previously used) caused chunks near the wrapped edge to silently
-// read back a different chunk's data -- almost certainly a GPU/driver tiling quirk at the
-// boundary texel, invisible from source since both CPU write and shader read compute correct
-// values. 32 (giving a 64-chunk window) is confirmed working and gives a larger view distance
-// than the original 22 besides.
 #define WORLD_HEIGHT_LIMIT 512
 #define WORLD_CHUNK_Y_MIN 0
 #define WORLD_CHUNK_Y_MAX (WORLD_HEIGHT_LIMIT / CHUNK_DIM)
@@ -35,6 +31,10 @@
 
 #define CHUNK_SLOT_GRID_COUNT (CHUNK_STREAM_WINDOW_XZ * CHUNK_STREAM_WINDOW_Y * CHUNK_STREAM_WINDOW_XZ)
 
+
+#define REGION_DIM_XZ 1024
+#define REGION_DIM_SHIFT 10 // log2(1024) voxel -> region shift
+#define REGION_CHUNK_SHIFT 5 
 
 typedef enum {
 
@@ -55,16 +55,12 @@ typedef enum {
 } StructureTypes;
 
 typedef struct {
-
-    uint8_t* voxels;
-    uint32_t dimensions[3];
-    uint32_t size;
-    
+    Model_t model;
+    uVector_t region_coords;
 } Structure_t;
 
-static Structure_t structure_list[STRUCTURE_COUNT];
+void structure_list_create(Structure_t* structure_list); //programaticly define structures
 
-void structure_list_create(); //programaticly define structures
 
 
 typedef struct {
@@ -76,6 +72,21 @@ typedef struct {
     bool occupied;
     iVector_t coord;
 } SlotGridEntry;
+
+
+//regions are structure placement areas
+//each chunk does an AABB test with every stucture in a region
+//then it checks if overlaps with a structures voxels and updates the chunks
+typedef struct {
+    Structure_t* structures;
+    uint32_t structure_count;
+} Region;
+
+typedef struct {
+    iVector_t key; //region -> y is ignored
+    Region value;
+} RegionMapEntry;
+
 
 typedef struct {
 
@@ -94,9 +105,19 @@ typedef struct {
     PerlinParams ymap;
     PerlinParams amplify;
 
+    RegionMapEntry* regions;
+
+    Structure_t structure_list[STRUCTURE_COUNT];
+
+    uint32_t seed;
+
 } WorldGenerator;
 
 WorldGenerator world_generator_create(uint32_t seed);
+void world_generator_free(WorldGenerator* gen);
+
+Region region_create(WorldGenerator* gen);
+void region_spawn_generator(WorldGenerator* wrldgen); //hardcode structure spawning around spawn
 
 typedef struct {
 
@@ -142,5 +163,7 @@ int world_chunk_find_collision(World* wrld, iVector_t coord, int excludeIdx); //
 //void world_structure_place(World* wrld, StructureTypes type, uint32_t origin[3], uint32_t normal, uint32_t rotation, float scale, bool overwrite);
 
 void world_destroy(World* wrld);
+
+void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin);
 
 #endif //WORLD_H

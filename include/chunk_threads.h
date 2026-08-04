@@ -12,8 +12,6 @@
 #include "queue.h"
 
 #define CHUNK_GEN_MAX_THREADS 8
-// same headroom rationale as MAX_QUEUE_SIZE in queue.h -- must stay able to hold a full
-// streaming-window's worth of pending results
 #define CHUNK_GEN_RESULT_QUEUE_CAP 131072
 
 typedef struct {

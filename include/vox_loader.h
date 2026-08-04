@@ -19,6 +19,7 @@
 #define VOX_MAX_GROUP_CHILDREN 64
 #define VOX_MAX_PLACEMENTS 256
 
+
 typedef struct {
     uint32_t dim[3]; // vox-space (x,y,z), Z-up, as read from SIZE
     uint8_t* xyzi; // num_voxels * (x, y, z, colorIndex)
@@ -223,13 +224,13 @@ static void vox_walk_node(
 }
 
 
-static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool matchPalette) {
-    Structure_t structure = {0};
+static Model_t vox_load_model_data(const char* path, MaterialTypes type, bool matchPalette) {
+    Model_t model = {0};
 
     FILE* fp = fopen(path, "rb");
     if (!fp) {
         printf("Cant open vox file: %s\n", path);
-        return structure;
+        return model;
     }
 
     char magic[4];
@@ -238,7 +239,7 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     if (memcmp(magic, "VOX ", 4) != 0) {
         printf("Not a vox file: %s\n", path);
         fclose(fp);
-        return structure;
+        return model;
     }
 
     fseek(fp, 12, SEEK_CUR); // MAIN chunk header; it has no content of its own
@@ -347,7 +348,7 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
 
     if (num_models == 0) {
         printf("vox file has no models: %s\n", path);
-        return structure;
+        return model;
     }
 
     // resolve every shape's world transform; files without a scene graph get one identity placement
@@ -373,14 +374,14 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     for (int32_t p = 0; p < num_placements; p++) {
         VoxPlacement* placement = &placements[p];
         if (placement->model_id < 0 || placement->model_id >= num_models) { continue; }
-        VoxRawModel* model = &models[placement->model_id];
+        VoxRawModel* rawModel = &models[placement->model_id];
         any_valid_placement = true;
 
         for (int32_t corner = 0; corner < 8; corner++) {
             int32_t local[3] = {
-                (corner & 1) ? (int32_t)model->dim[0] : 0,
-                (corner & 2) ? (int32_t)model->dim[1] : 0,
-                (corner & 4) ? (int32_t)model->dim[2] : 0
+                (corner & 1) ? (int32_t)rawModel->dim[0] : 0,
+                (corner & 2) ? (int32_t)rawModel->dim[1] : 0,
+                (corner & 4) ? (int32_t)rawModel->dim[2] : 0
             };
             int32_t rotated[3];
             vox_mat3_apply(placement->r, local, rotated);
@@ -395,7 +396,7 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     if (!any_valid_placement) {
         printf("vox file has no valid placements: %s\n", path);
         for (int32_t i = 0; i < num_models; i++) { free(models[i].xyzi); }
-        return structure;
+        return model;
     }
 
     // this engine is Y-up; remap vox-space (x,y,z) -> local (x,z,y)
@@ -406,28 +407,28 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
     };
     uint32_t size = dim[0] * dim[1] * dim[2];
 
-    structure.size = size;
-    structure.voxels = calloc(size, sizeof(uint8_t));
-    if (structure.voxels == NULL) {
+    model.size = size;
+    model.voxels = calloc(size, sizeof(uint8_t));
+    if (model.voxels == NULL) {
         printf("vox file bounding box too large to allocate (%u voxels): %s\n", size, path);
-        structure.size = 0;
+        model.size = 0;
         for (int32_t i = 0; i < num_models; i++) { free(models[i].xyzi); }
-        return structure;
+        return model;
     }
-    memcpy(structure.dimensions, dim, sizeof(structure.dimensions));
+    model.dimensions = uVector_create(dim[0], dim[1], dim[2]);
 
     for (int32_t p = 0; p < num_placements; p++) {
         VoxPlacement* placement = &placements[p];
         if (placement->model_id < 0 || placement->model_id >= num_models) { continue; }
-        VoxRawModel* model = &models[placement->model_id];
+        VoxRawModel* rawModel = &models[placement->model_id];
 
-        for (int32_t i = 0; i < model->num_voxels; i++) {
+        for (int32_t i = 0; i < rawModel->num_voxels; i++) {
             int32_t local[3] = {
-                model->xyzi[i * 4 + 0],
-                model->xyzi[i * 4 + 1],
-                model->xyzi[i * 4 + 2]
+                rawModel->xyzi[i * 4 + 0],
+                rawModel->xyzi[i * 4 + 1],
+                rawModel->xyzi[i * 4 + 2]
             };
-            uint8_t colorIndex = model->xyzi[i * 4 + 3];
+            uint8_t colorIndex = rawModel->xyzi[i * 4 + 3];
             int32_t rotated[3];
             vox_mat3_apply(placement->r, local, rotated);
 
@@ -449,27 +450,20 @@ static Structure_t structure_load_vox(const char* path, MaterialTypes type, bool
                     material = vox_match_light_color(rgba[0], rgba[1], rgba[2]);
                 }
             }
-            structure.voxels[idx] = material;
+            model.voxels[idx] = material;
         }
     }
 
     for (int32_t i = 0; i < num_models; i++) {
         free(models[i].xyzi);
     }
-    return structure;
+    return model;
 }
 
-// same loader, repackaged as a Model_t instead of a Structure_t
 static Model_t vox_load_model(const char* path, uint8_t up_axis, uint8_t cardinal_axis, MaterialTypes material, bool colorMatch) {
-    Structure_t structure = structure_load_vox(path, material, colorMatch);
-
-    Model_t model = {0};
-    model.voxels = structure.voxels;
-    memcpy(model.dimensions, structure.dimensions, sizeof(model.dimensions));
-    model.size = structure.size;
+    Model_t model = vox_load_model_data(path, material, colorMatch);
     model.up_axis = up_axis;
     model.cardinal_axis = cardinal_axis;
     return model;
 }
-
 #endif //VOX_LOADER_H

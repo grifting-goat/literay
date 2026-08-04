@@ -11,23 +11,24 @@ This is my sandbox testing enviroment for voxel-based raytracing
 - Path tracing
     - using bitmasking layers for the grid-aligned voxels
         - [Amanatides and Woo traversal](http://www.cse.yorku.ca/~amana/research/grid.pdf)
-    - using Octrees for dynamic voxels
+    - using aabb + transforms into local bittmasked grid-aligned regions for dynamic voxels
     
 - Lighting
     - direct lighting (shadow rays for performance)
     - global illumination
     - specular reflections
     - refraction
+        - i keep on imagining the invisiblity implemention in halo   
 
 - Chunk loading
     - have around 1 GB of voxel data on the GPU at a time
-    - stream chunks in out of this as the play moves around
+    - stream chunks in out of this as the player moves around
 
 - Basic terrain generation
     - just stacked noise maps really
 
 - Portals
-    - portals are almost free thanks to path tracing
+    - portal visuals are almost free thanks to path tracing
 
 - Models
     - add voxel models to the world

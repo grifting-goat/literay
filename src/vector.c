@@ -41,3 +41,23 @@ Vector_t vector_lerp(const Vector_t* a, const Vector_t* b, const float t) {
         a->z + (b->z - a->z) * t
     };
 }
+
+uVector_t uVector_add(const uVector_t* a, const uVector_t* b) {
+    return (uVector_t){a->x + b->x, a->y + b->y, a->z + b->z};
+}
+uVector_t uVector_subtract(const uVector_t* a, const uVector_t* b) {
+    return (uVector_t){a->x - b->x, a->y - b->y, a->z - b->z};
+}
+uVector_t uVector_scale(const uVector_t* vec, const uint32_t scalar) {
+    return (uVector_t){vec->x * scalar, vec->y * scalar, vec->z * scalar};
+}
+
+iVector_t iVector_add(const iVector_t* a, const iVector_t* b) {
+    return (iVector_t){a->x + b->x, a->y + b->y, a->z + b->z};
+}
+iVector_t iVector_subtract(const iVector_t* a, const iVector_t* b) {
+    return (iVector_t){a->x - b->x, a->y - b->y, a->z - b->z};
+}
+iVector_t iVector_scale(const iVector_t* vec, const int32_t scalar) {
+    return (iVector_t){vec->x * scalar, vec->y * scalar, vec->z * scalar};
+}

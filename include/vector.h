@@ -35,6 +35,14 @@ Vector_t vector_scale(const Vector_t* vec, float scalar);
 float vector_dot(const Vector_t* a, const Vector_t* b);
 Vector_t vector_lerp(const Vector_t* a, const Vector_t* b, float t);
 
+uVector_t uVector_add(const uVector_t* a, const uVector_t* b);
+uVector_t uVector_subtract(const uVector_t* a, const uVector_t* b);
+uVector_t uVector_scale(const uVector_t* vec, uint32_t scalar);
+
+iVector_t iVector_add(const iVector_t* a, const iVector_t* b);
+iVector_t iVector_subtract(const iVector_t* a, const iVector_t* b);
+iVector_t iVector_scale(const iVector_t* vec, int32_t scalar);
+
 
 
 
