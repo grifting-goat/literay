@@ -65,12 +65,12 @@ Material material_list[0xFF] = {
         .opaque = 1.0f
     },
     [GRASS] = {
-        .color = {0.016f, 0.561f, 0.008f, 1.0f},
+        .color = {0.188, 0.839, 0.086, 1.0f},
         .emissionColor = {0.016f, 0.561f, 0.008f, 1.0f},
         .emissionStrength = 0.0f,
         .smoothness = 0.4f,
         .specularProbability = 0.0f,
-        .noise = 0.03f,
+        .noise = 0.07f,
         .opaque = 1.0f
     },
     [DIRT] = {
@@ -200,7 +200,7 @@ void material_palette_create() {
     for (int i = PALETTE_MATERIAL_BASE; i < MATERIAL_COUNT; i++) {
         int hueIdx = i % 16;
         int valIdx = (i / 16) % 4;
-        int satIdx = i / 64;
+        int satIdx = (i / 64) % 2;
 
         float hue = hueIdx * (360.0f / 16.0f);
         float val = VALUES[valIdx];

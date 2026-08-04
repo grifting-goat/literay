@@ -51,8 +51,6 @@ void createSwapchain(Window_t* window);
 
 void createComputePipeline(Window_t* window);
 
-void createComputeShader(Window_t* window);
-
 Vk_Buffer_t createHostVisibleBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
 Vk_Buffer_t createDeviceLocalBuffer(Window_t* window, VkDeviceSize size, VkBufferUsageFlags usage);
 void uploadBufferData(Window_t* window, VkBuffer dst, const void* data, VkDeviceSize size);
@@ -106,7 +104,6 @@ void window_attach_device(Window_t* window) {
 	createAccumImage(window);
 	createSwapchain(window);
 
-	createComputeShader(window);
 	createComputePipeline(window);
 	createComputeBuffers(window);
 	createComputeDescriptorSet(window);
@@ -120,7 +117,9 @@ void window_camera_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 	CameraData* ubo = (CameraData*)window->vk_objects.cameraDataBuffer[frame_res_index].mapped;
 
 	bool cameraMoved = camera_check_moved(c);
-	window->vk_objects.accumCount = cameraMoved ? 1 : window->vk_objects.accumCount + 1;
+	bool reset = cameraMoved || window->vk_objects.forceAccumReset;
+	window->vk_objects.accumCount = reset ? 1 : window->vk_objects.accumCount + 1;
+	window->vk_objects.forceAccumReset = false;
 
 	ubo->camera_position[0] = c->pos.x;
 	ubo->camera_position[1] = c->pos.y;
@@ -180,8 +179,8 @@ void window_entity_buffer_update(Window_t* window, Camera* c, uint32_t frame_res
 	float dimY = (float)model->dimensions.y;
 	float dimZ = (float)model->dimensions.z;
 
-	entity->scale = 4.0f / dimY;
-	entity->position[1] -= 3.0f;
+	entity->scale = 8.0f / dimY;
+	entity->position[1] -= 7.2f;
 
 	float halfDiag = 0.5f * sqrtf(dimX * dimX + dimZ * dimZ) * entity->scale;
 
@@ -323,8 +322,12 @@ void window_render(Window_t* window, Camera* cam, Vector_t sun_direction) {
 	pre_dispatch_dep_info.pImageMemoryBarriers=pre_dispatch_barriers;
 	vkCmdPipelineBarrier2(res->commandBuffer, &pre_dispatch_dep_info);
 
-	vkCmdBindPipeline(res->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, window->vk_objects.computePipeline.handle);
-	vkCmdBindDescriptorSets(res->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, window->vk_objects.computePipeline.layout, 0, 1, &window->vk_objects.computeDescriptorSet[frame_res_index], 0, NULL);
+	VkPipeline activePipeline = window->vk_objects.activeShaderIndex == 0
+		? window->vk_objects.computePipelineA
+		: window->vk_objects.computePipelineB;
+
+	vkCmdBindPipeline(res->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, activePipeline);
+	vkCmdBindDescriptorSets(res->commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, window->vk_objects.computePipelineLayout, 0, 1, &window->vk_objects.computeDescriptorSet[frame_res_index], 0, NULL);
 
 	PushConstants push_constants = {0};
 	push_constants._screen_size[0] = (int)window->vk_objects.swapchain_data.swapchainWidth;
@@ -347,7 +350,7 @@ void window_render(Window_t* window, Camera* cam, Vector_t sun_direction) {
 	}
 
 
-	vkCmdPushConstants(res->commandBuffer, window->vk_objects.computePipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &push_constants);
+	vkCmdPushConstants(res->commandBuffer, window->vk_objects.computePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants), &push_constants);
 
 	uint32_t group_count_x = (window->vk_objects.swapchain_data.swapchainWidth + 7) / 8;
 	uint32_t group_count_y = (window->vk_objects.swapchain_data.swapchainHeight + 7) / 8;
@@ -601,11 +604,14 @@ void window_close(Window_t* window) {
 		vkDestroyDescriptorSetLayout(vk->device, vk->computeDescriptorSetLayout, NULL);
 	}
 
-	if (vk->computePipeline.handle != VK_NULL_HANDLE) {
-		vkDestroyPipeline(vk->device, vk->computePipeline.handle, NULL);
+	if (vk->computePipelineA != VK_NULL_HANDLE) {
+		vkDestroyPipeline(vk->device, vk->computePipelineA, NULL);
 	}
-	if (vk->computePipeline.layout != VK_NULL_HANDLE) {
-		vkDestroyPipelineLayout(vk->device, vk->computePipeline.layout, NULL);
+	if (vk->computePipelineB != VK_NULL_HANDLE) {
+		vkDestroyPipeline(vk->device, vk->computePipelineB, NULL);
+	}
+	if (vk->computePipelineLayout != VK_NULL_HANDLE) {
+		vkDestroyPipelineLayout(vk->device, vk->computePipelineLayout, NULL);
 	}
 
 	destroyVkImage(vk->device, &vk->brickAtlasTexture);
@@ -1161,9 +1167,61 @@ void createSwapchain(Window_t* window) {
 
 
 
-void createComputePipeline(Window_t* window) {
-	Pipeline_t pipeline = {0};
+static bool loadShaderModule(Window_t* window, const char* spvPath, VkShaderModule* outModule) {
+	FILE *fp = fopen(spvPath, "rb");
+	if (fp == NULL) {
+		printf("can't find compute SPIR-V binary: %s\n", spvPath);
+		return false;
+	}
 
+	fseek(fp, 0, SEEK_END);
+	uint32_t codeSize = ftell(fp);
+	rewind(fp);
+
+	char *code = (char *)malloc(codeSize);
+	fread(code, 1, codeSize, fp);
+	fclose(fp);
+
+	VkShaderModuleCreateInfo module_info = {0};
+	module_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	module_info.codeSize = codeSize;
+	module_info.pCode = (const uint32_t *)code;
+
+	VkResult result = vkCreateShaderModule(window->vk_objects.device, &module_info, NULL, outModule);
+	free(code);
+
+	if (result != VK_SUCCESS) {
+		printf("failed to create shader module from %s\n", spvPath);
+		return false;
+	}
+	return true;
+}
+
+static bool createComputePipelinePair(Window_t* window, VkShaderModule modA, VkShaderModule modB, VkPipeline* outA, VkPipeline* outB) {
+	VkPipelineShaderStageCreateInfo stageA = {0}, stageB = {0};
+	stageA.sType = stageB.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+	stageA.stage = stageB.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	stageA.module = modA;
+	stageB.module = modB;
+	stageA.pName = stageB.pName = "main";
+
+	VkComputePipelineCreateInfo infos[2] = {0};
+	infos[0].sType = infos[1].sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	infos[0].stage = stageA;
+	infos[1].stage = stageB;
+	infos[0].layout = infos[1].layout = window->vk_objects.computePipelineLayout;
+
+	VkPipeline pipelines[2] = {0};
+	if (vkCreateComputePipelines(window->vk_objects.device, VK_NULL_HANDLE, 2, infos, NULL, pipelines) != VK_SUCCESS) {
+		printf("Error creating the compute pipelines\n");
+		return false;
+	}
+	*outA = pipelines[0];
+	*outB = pipelines[1];
+	return true;
+}
+
+void createComputePipeline(Window_t* window) {
 	VkDescriptorSetLayoutBinding bindings[11] = {0};
 	bindings[0].binding = 1;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE; // brick atlas texture (voxel data)
@@ -1242,69 +1300,76 @@ void createComputePipeline(Window_t* window) {
 	pipeline_layout_info.pushConstantRangeCount = 1;
 	pipeline_layout_info.pPushConstantRanges = &push_constant_range;
 
-	if (vkCreatePipelineLayout(window->vk_objects.device, &pipeline_layout_info, NULL, &pipeline.layout) != VK_SUCCESS) {
+	if (vkCreatePipelineLayout(window->vk_objects.device, &pipeline_layout_info, NULL, &window->vk_objects.computePipelineLayout) != VK_SUCCESS) {
 		printf("Unable to create the compute pipeline layout\n");
 		return;
 	}
 
-	VkPipelineShaderStageCreateInfo stage_info = {0};
-	stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-	stage_info.module = window->vk_objects.computeShader;
-	stage_info.pName = "main";
-
-	VkComputePipelineCreateInfo compute_pipeline_info = {0};
-	compute_pipeline_info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-	compute_pipeline_info.stage = stage_info;
-	compute_pipeline_info.layout = pipeline.layout;
-
-	if (vkCreateComputePipelines(window->vk_objects.device, VK_NULL_HANDLE, 1, &compute_pipeline_info, NULL, &pipeline.handle) != VK_SUCCESS) {
-		printf("Error creating the compute pipeline\n");
+	VkShaderModule modA, modB;
+	if (!loadShaderModule(window, "shaders/compute_a.spv", &modA)) {
+		return;
+	}
+	if (!loadShaderModule(window, "shaders/compute_b.spv", &modB)) {
+		vkDestroyShaderModule(window->vk_objects.device, modA, NULL);
 		return;
 	}
 
-	vkDestroyShaderModule(window->vk_objects.device, window->vk_objects.computeShader, NULL);
-	printf("compute shader module destroyed.\n");
+	VkPipeline pipelineA, pipelineB;
+	bool built = createComputePipelinePair(window, modA, modB, &pipelineA, &pipelineB);
 
-	window->vk_objects.computePipeline = pipeline;
-	printf("compute pipeline created.\n");
+	vkDestroyShaderModule(window->vk_objects.device, modA, NULL);
+	vkDestroyShaderModule(window->vk_objects.device, modB, NULL);
+	printf("compute shader modules destroyed.\n");
+
+	if (!built) {
+		return;
+	}
+
+	window->vk_objects.computePipelineA = pipelineA;
+	window->vk_objects.computePipelineB = pipelineB;
+	printf("compute pipelines created.\n");
 }
 
+void window_toggle_shader(Window_t* window) {
+	window->vk_objects.activeShaderIndex ^= 1u;
+	window->vk_objects.forceAccumReset = true;
+	printf("\nactive shader: %s\n", window->vk_objects.activeShaderIndex == 0 ? "A" : "B");
+}
 
-void createComputeShader(Window_t* window) {
-	FILE *fp_compute=NULL;
+void window_reload_shaders(Window_t* window) {
+	printf("\nreloading shaders...\n");
 
-	fp_compute=fopen("shaders/compute.spv","rb+");
-
-	if(fp_compute==NULL){
-		printf("can't find compute SPIR-V binary.\n");
+	VkShaderModule modA, modB;
+	if (!loadShaderModule(window, "shaders/compute_a.spv", &modA)) {
+		printf("shader reload failed: could not read compute_a.spv, keeping current pipelines.\n");
+		return;
+	}
+	if (!loadShaderModule(window, "shaders/compute_b.spv", &modB)) {
+		printf("shader reload failed: could not read compute_b.spv, keeping current pipelines.\n");
+		vkDestroyShaderModule(window->vk_objects.device, modA, NULL);
 		return;
 	}
 
-	fseek(fp_compute,0,SEEK_END);
-	uint32_t compute_size=ftell(fp_compute);
+	VkPipeline newA, newB;
+	bool built = createComputePipelinePair(window, modA, modB, &newA, &newB);
 
-	char *p_compute_code=(char *)malloc(compute_size*sizeof(char));
+	vkDestroyShaderModule(window->vk_objects.device, modA, NULL);
+	vkDestroyShaderModule(window->vk_objects.device, modB, NULL);
 
-	rewind(fp_compute);
-	fread(p_compute_code,1,compute_size,fp_compute);
-	printf("compute shader binary loaded.\n");
+	if (!built) {
+		printf("shader reload failed: pipeline creation error, keeping current pipelines.\n");
+		return;
+	}
 
-	fclose(fp_compute);
+	vkDeviceWaitIdle(window->vk_objects.device);
+	vkDestroyPipeline(window->vk_objects.device, window->vk_objects.computePipelineA, NULL);
+	vkDestroyPipeline(window->vk_objects.device, window->vk_objects.computePipelineB, NULL);
 
-	//create shader module
-	VkShaderModuleCreateInfo compute_shader_module_create_info;
-	compute_shader_module_create_info.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	compute_shader_module_create_info.pNext=NULL;
-	compute_shader_module_create_info.flags=0;
-	compute_shader_module_create_info.codeSize=compute_size;
-	compute_shader_module_create_info.pCode=(const uint32_t *)p_compute_code;
+	window->vk_objects.computePipelineA = newA;
+	window->vk_objects.computePipelineB = newB;
+	window->vk_objects.forceAccumReset = true;
 
-	vkCreateShaderModule(window->vk_objects.device,&compute_shader_module_create_info,NULL,&window->vk_objects.computeShader);
-	printf("compute shader module created.\n");
-
-	free(p_compute_code);
-	printf("compute shader binary released.\n");
+	printf("shaders reloaded.\n");
 }
 
 

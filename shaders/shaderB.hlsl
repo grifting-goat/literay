@@ -35,7 +35,6 @@ struct Entity {
     float4 position; // xyz used, w padding
     float4 rotation; // xyz used, w padding
 
-    // conservative world-space AABB (valid under any yaw), precomputed on the CPU
     float4 worldMin;
     float4 worldMax;
 
@@ -76,8 +75,6 @@ struct PushConstants {
 [[vk::push_constant]] PushConstants pc;
 
 static const float FLT_INF = asfloat(0x7F800000);
-static const float MAX_RAY_DISTANCE = 2048.0f / 2.0f;
-static const float MAX_TOTAL_DISTANCE = MAX_RAY_DISTANCE * 2.0f;
 static const uint MAX_BOUNCES = 2;
 static const uint RAYS_PER_PIXEL = 1;
 static const uint MAX_BONUS_BOUNCES = 3;
@@ -98,7 +95,11 @@ static const int CHUNK_STREAM_WINDOW_BRICKS_Y = CHUNK_STREAM_WINDOW_VOXELS_Y / i
 static const int CHUNK_STREAM_WINDOW_CHUNKS_XZ = CHUNK_STREAM_WINDOW_BRICKS_XZ / BRICKS_PER_CHUNK_AXIS;
 static const int CHUNK_STREAM_WINDOW_CHUNKS_Y = CHUNK_STREAM_WINDOW_BRICKS_Y / BRICKS_PER_CHUNK_AXIS;
 
-static const float DENSITY = 0.0f;//0.001f;
+
+static const float MAX_RAY_DISTANCE = float(CHUNK_STREAM_WINDOW_VOXELS_XZ) / 2.0f;
+static const float MAX_TOTAL_DISTANCE = MAX_RAY_DISTANCE * 2.0f;
+
+static const float DENSITY = 0.0000f;//0.001f;
 
 int3 WrapCoord3Aniso(int3 v, int nXZ, int nY) {
     int3 n = int3(nXZ, nY, nXZ);
@@ -121,8 +122,9 @@ static const float3 SunColourDay  = float3(1.0f, 1.0f, 0.95f);
 
 static const float SunFocus = 500.0f;
 static const float SunIntensity = 0.5f;
+static const float SunAngularCosHalf = 0.99999f;
 
-static const float3 AmbientLight = float3(0.05f, 0.05f, 0.05f);
+static const float3 AmbientLight = float3(0.01f, 0.01f, 0.01f);
 
 struct Ray {
     float3 origin;
@@ -208,9 +210,39 @@ float3 CosineWeightedDirection(float3 normal, inout uint state) {
     return normalize(t * local.x + b * local.y + normal * local.z);
 }
 
+float3 SampleConeDirection(float3 dir, float cosHalfAngle, inout uint state) {
+    float3 t, b;
+    BuildONB(dir, t, b);
+    float z = 1.0f - RandomValue(state) * (1.0f - cosHalfAngle);
+    float phi = 6.2831853f * RandomValue(state);
+    float r = sqrt(max(0.0f, 1.0f - z * z));
+    float s, c;
+    sincos(phi, s, c);
+    return normalize(t * (r * c) + b * (r * s) + dir * z);
+}
+
+float3 SampleGGXReflection(float3 incoming, float3 normal, float alpha, inout uint state) {
+    float3 t, b;
+    BuildONB(normal, t, b);
+
+    float u1 = RandomValue(state);
+    float u2 = RandomValue(state);
+
+    float cosTheta = sqrt(saturate((1.0f - u2) / (1.0f + (alpha * alpha - 1.0f) * u2)));
+    float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+    float phi = 6.2831853f * u1;
+
+    float s, c;
+    sincos(phi, s, c);
+    float3 h = normalize(t * (sinTheta * c) + b * (sinTheta * s) + normal * cosTheta);
+
+    return incoming - 2.0f * dot(incoming, h) * h;
+}
+
 Ray CreateRay(float3 origin, float3 direction) {
     Ray ray;
     ray.origin = origin;
+    direction = select(direction == 0.0f, 1e-6f, direction);
     ray.direction = normalize(direction);
     ray.invDir = rcp(ray.direction);
     ray.cumdist = 0.000f;
@@ -314,14 +346,21 @@ float3 GetEnvironmentLight(Ray ray) {
     float sunVisibility = smoothstep(-0.05f, 0.05f, elevation);
     float3 sunColor = lerp(SunColourDusk, SunColourDay, smoothstep(0.0f, 0.3f, elevation));
 
-    if (ray.direction.y <= 0.0f) {
-        float voidT = smoothstep(-0.4f, 0.0f, ray.direction.y);
-        return horizonColor * voidT;
+    float cameraHeight = max(0.0f, camera_position.y - 130.0f); // ~130 approximates typical ground/sea level
+    float horizonOffset = saturate(cameraHeight / MAX_RAY_DISTANCE);
+
+    if (ray.direction.y <= -horizonOffset) {
+
+        float3 deepHaze = zenithColor * 0.3f;
+        float voidT = smoothstep(-0.35f - horizonOffset, -horizonOffset, ray.direction.y);
+        return lerp(deepHaze, horizonColor, voidT);
     }
 
-    float skyGradientT = pow(smoothstep(0, 0.4, ray.direction.y), 0.35);
+    float skyGradientT = pow(smoothstep(-horizonOffset, 0.4f - horizonOffset, ray.direction.y), 0.35);
     float3 skyGradient = lerp(horizonColor, zenithColor, skyGradientT);
-    float sun = pow(max(0, dot(ray.direction, pc.sun_direction)), SunFocus) * SunIntensity * sunVisibility;
+
+    float3 sunDiscDir = normalize(float3(pc.sun_direction.x, pc.sun_direction.y - horizonOffset, pc.sun_direction.z));
+    float sun = pow(max(0, dot(ray.direction, sunDiscDir)), SunFocus) * SunIntensity * sunVisibility;
 
     return skyGradient + sun * sunColor;
 }
@@ -600,8 +639,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint bonus = 0;
 
     for (uint sample = 0; sample < RAYS_PER_PIXEL; sample++) {
-        // no accumulation happening this frame (camera just moved) -- a jittered offset would
-        // just shimmer with nothing to blend it against, so sample dead-center instead
         float2 jitter = pc.accumCount > 1 ? NextBlueNoise2(blueState) - 0.5f : 0.0f;
         float x = (float(pixel.x) + 0.5f + jitter.x) / float(pc._screen_size.x);
         float y = (float(pixel.y) + 0.5f + jitter.y) / float(pc._screen_size.y);
@@ -612,11 +649,17 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         bool trackViewDist = true;
         bool escaped = false;
         for (uint bounces = 0; bounces < MAX_BOUNCES + bonus; bounces++) {
+            if (bounces >= MAX_BOUNCES) {
+                float survive = saturate(max(r.color.r, max(r.color.g, r.color.b)));
+                if (RandomValue(rngState) > survive) {
+                    break;
+                }
+                r.color /= max(survive, 1e-4f);
+            }
+
             Hit hit = CastRay(r, bounces == 0 ? 0 : -1);
             r.cumdist += hit.dist;
             if (trackViewDist && hit.mat_type != 0) {
-                // pair the fade color with the current segment's own direction, so a mirror
-                // fades toward the sky it's actually reflecting, not the camera's own direction
                 viewDist += hit.dist;
                 voidColor = GetEnvironmentLight(r) * r.color;
             }
@@ -632,12 +675,18 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
 
                 //shadow ray
                 if (!bounces || bonus == 1) { //keep shdows in mirrors
-                    Ray shadow = CreateRay(hit.end + (hit.normal * 0.01f), pc.sun_direction);
-                    Hit shadowHit = CastRay(shadow, -1);
 
-                    if (shadowHit.mat_type == 0) { 
-                        float sunAmount = saturate(dot(hit.normal, pc.sun_direction));
-                        r.incomingLight += SunIntensity * sunAmount * mat.color.rgb * r.color;
+                    float sunElevationVisibility = smoothstep(-0.05f, 0.05f, pc.sun_direction.y);
+                    if (sunElevationVisibility > 0.0f) {
+
+                        float3 sunSampleDir = SampleConeDirection(pc.sun_direction, SunAngularCosHalf, rngState);
+                        Ray shadow = CreateRay(hit.end + hit.normal * 0.01f + sunSampleDir * 0.02f, sunSampleDir);
+                        Hit shadowHit = CastRay(shadow, -1);
+
+                        if (shadowHit.mat_type == 0) {
+                            float sunAmount = saturate(dot(hit.normal, sunSampleDir));
+                            r.incomingLight += SunIntensity * sunAmount * sunElevationVisibility * mat.color.rgb * r.color;
+                        }
                     }
                 }
 
@@ -657,9 +706,15 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                 bonus = min(bonus + (uint)isSpecular, MAX_BONUS_BOUNCES);
 
                 float3 diffuseDir = CosineWeightedDirection(hit.normal, rngState);
-                float3 specularDir = Reflect(r.direction, hit.normal);
 
-                r.direction = normalize(lerp(diffuseDir, specularDir, mat.smoothness * isSpecular));
+                float roughness = 1.0f - mat.smoothness;
+                float alpha = max(roughness * roughness, 1e-3f);
+                float3 specularDir = SampleGGXReflection(r.direction, hit.normal, alpha, rngState);
+                if (dot(specularDir, hit.normal) <= 0.0f) {
+                    specularDir = Reflect(r.direction, hit.normal);
+                }
+
+                r.direction = normalize(isSpecular ? specularDir : diffuseDir);
                 r.invDir = rcp(r.direction);
 
                 r.incomingLight += AmbientLight * r.color * (!isSpecular); //so specular doesnt add any ambiant light
@@ -669,7 +724,6 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
                     float voidT = 44.444f * ((x-0.85) * (x-0.85));
                     r.incomingLight = lerp(r.incomingLight, voidColor, voidT);
                 }
-
 
             }
             else {

@@ -38,10 +38,10 @@ int main() {
 	command_register(&cmd, "tp", camera_teleport_command, &cam);
 
 
-	model_instance_list[0] = model_create_from_vox("./res/models/cute.vox" , 0, 0, AIR, true); 
-	window_attach_device(&window); //fix the ordering bug here
-
 	material_palette_create(); //dynamic for iterative purposes
+
+	model_instance_list[0] = model_create_from_vox("./res/models/brokeguy.vox" , 0, 0, AIR, true);
+	window_attach_device(&window); //fix the ordering bug here
 
 	window_model_buffer_load(&window, model_instance_list);
 
@@ -78,6 +78,9 @@ int main() {
 	const float mouseSensitivity = 0.0007f;
     const float pitchLimit = 1.55334f;
 
+    bool prevYKeyDown = false;
+    bool prevF1KeyDown = false;
+
     double lastFrameTime = glfwGetTime();
     double fpsTimer = 0.0;
 	int fpsFrameCount = 0;
@@ -85,8 +88,11 @@ int main() {
 	double gpuTimeAccumMs = 0.0;
 	const double fpsUpdateInterval = 0.2; // 5 Hz
 
-	Vector_t sun_direction = vector_create(0.318f, 0.848f, 0.424f);
-	command_register(&cmd, "sundir", sun_command, &sun_direction);
+	float sunx = 0.0f;
+	float suny = 1.0f;
+	float time = 0;
+	Vector_t sun_direction = vector_create(sunx, suny, 0.0f);
+	//command_register(&cmd, "sundir", sun_command, &sun_direction);
 
 	world_chunk_memory_queue(&wrld, &cam.pos);
 
@@ -96,6 +102,17 @@ int main() {
         double cpuFrameStart = glfwGetTime();
         window_poll_events(&window);
 
+        bool yKeyDown = glfwGetKey(window.glfw_window, GLFW_KEY_Y) == GLFW_PRESS;
+        if (yKeyDown && !prevYKeyDown) {
+            window_toggle_shader(&window);
+        }
+        prevYKeyDown = yKeyDown;
+
+        bool f1KeyDown = glfwGetKey(window.glfw_window, GLFW_KEY_F1) == GLFW_PRESS;
+        if (f1KeyDown && !prevF1KeyDown) {
+            window_reload_shaders(&window);
+        }
+        prevF1KeyDown = f1KeyDown;
 
         double currentFrameTime = glfwGetTime();
         float frameTime = (float)(currentFrameTime - lastFrameTime);
@@ -149,6 +166,11 @@ int main() {
 			cpuTimeAccumMs = 0.0;
 			gpuTimeAccumMs = 0.0;
 		}
+
+		time += frameTime / 100.0;
+		sunx = sinf(time);
+		suny = cosf(time);
+		sun_direction = vector_create(sunx, suny, 0.0f);
 
     }
 

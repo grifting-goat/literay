@@ -492,6 +492,31 @@ int perlin_iter(uint32_t x, uint32_t z, iVector_t coord, PerlinParams* pp, doubl
     return total_height;
 }
 
+// same two-pass (amplify -> ymap) noise used for voxel-column generation below,
+// reused as-is for terrain height queries (structure placement) so both stay in sync
+static int terrain_column_height(WorldGenerator* gen, iVector_t coord, uint32_t x, uint32_t z) {
+    double amps = gen->amplify.amplitude;
+    perlin_iter(x, z, coord, &gen->amplify, &amps);
+
+    double t = (amps + 1.0) * 0.5;
+    t = smoothstep(0.2, 0.9, t);
+    amps = 16 + t * 450;
+
+    return perlin_iter(x, z, coord, &gen->ymap, &amps);
+}
+
+// surface height at an arbitrary world (x,z), independent of any chunk existing
+static int world_terrain_height_at(WorldGenerator* gen, int32_t worldX, int32_t worldZ) {
+    int32_t chunkX = (int32_t)floor((double)worldX / CHUNK_DIM);
+    int32_t chunkZ = (int32_t)floor((double)worldZ / CHUNK_DIM);
+    iVector_t coord = iVector_create(chunkX, 0, chunkZ);
+
+    uint32_t localX = (uint32_t)(worldX - chunkX * CHUNK_DIM);
+    uint32_t localZ = (uint32_t)(worldZ - chunkZ * CHUNK_DIM);
+
+    return terrain_column_height(gen, coord, localX, localZ);
+}
+
 Chunk chunk_create(World* wrld, iVector_t coord) {
 
     Chunk chunk = {0};
@@ -507,17 +532,9 @@ Chunk chunk_create(World* wrld, iVector_t coord) {
 	for (uint32_t z = 0; z < dimZ; z++) {
 		for (uint32_t x = 0; x < dimX; x++) {
 
-            double amps = wrld->generator.amplify.amplitude;
-            perlin_iter(x, z, coord, &wrld->generator.amplify, &amps);
+            int total_height = terrain_column_height(&wrld->generator, coord, x, z);
 
-            double t = (amps + 1.0) * 0.5;
-            t = smoothstep(0.2, 0.9, t);
-
-            amps = 16 + t * 450;
-
-            int total_height = perlin_iter(x, z, coord, &wrld->generator.ymap, &amps);
-
-            int localHeightRaw = total_height - chunkBaseY; 
+            int localHeightRaw = total_height - chunkBaseY;
 
             int height = localHeightRaw;
             if (height < 0) { height = 0; }
@@ -560,7 +577,7 @@ Chunk chunk_create(World* wrld, iVector_t coord) {
             }
             if (localHeightRaw >= 0 && localHeightRaw < dimY) {
                 uint32_t topIdx = x + (uint32_t)height * dimX + z * dimX * dimY;
-                if ((uint32_t)total_height <= wrld->generator.ymap.sea_level) {
+                if ((uint32_t)total_height <= wrld->generator.ymap.sea_level + 2 + (h % 3)) {
                     chunk.voxels[topIdx] = SAND;
                 } else if (total_height < stone) {
                     chunk.voxels[topIdx] = total_height < stone - 1 ? GRASS : DIRT;
@@ -598,9 +615,8 @@ void world_destroy(World* wrld) {
     world_generator_free(&wrld->generator);
 }
 
-
 void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin, uint8_t rotation) {
-    iVector_t region_coord = iVector_create(origin.x >> REGION_DIM_SHIFT, 0 , origin.z >> REGION_DIM_SHIFT);
+    iVector_t region_coord = iVector_create(origin.x >> REGION_DIM_SHIFT, 0, origin.z >> REGION_DIM_SHIFT);
     uVector_t region_rel_coord = uVector_create(
         (uint32_t)wrap_axis(origin.x, 1 << REGION_DIM_SHIFT),
         (uint32_t)origin.y,

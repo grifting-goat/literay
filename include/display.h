@@ -40,11 +40,6 @@
 #include "compute_res.h"
 
 typedef struct {
-	VkPipelineLayout layout;
-	VkPipeline handle;
-} Pipeline_t;
-
-typedef struct {
 	uint32_t lastFrameId;
 	VkCommandPool commandPool;
 	VkCommandBuffer commandBuffer;
@@ -140,8 +135,11 @@ typedef struct {
     Vk_Image_t outputImageRes[MAX_FRAMES_IN_FLIGHT];
     Vk_Image_t accumImageRes; // single, persistent across frames
     uint32_t accumCount;
-    VkShaderModule computeShader;
-    Pipeline_t computePipeline;
+    VkPipelineLayout computePipelineLayout;
+    VkPipeline computePipelineA;
+    VkPipeline computePipelineB;
+    uint32_t activeShaderIndex;
+    bool forceAccumReset;
     VkDescriptorSetLayout computeDescriptorSetLayout;
     VkDescriptorPool computeDescriptorPool;
     VkDescriptorSet computeDescriptorSet[MAX_FRAMES_IN_FLIGHT];
@@ -201,6 +199,9 @@ bool window_should_close(Window_t* window);
 
 void window_poll_events(Window_t* window);
 
+void window_toggle_shader(Window_t* window);
+
+void window_reload_shaders(Window_t* window);
 
 
 

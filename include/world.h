@@ -33,8 +33,8 @@
 
 
 #define REGION_DIM_XZ 1024
-#define REGION_DIM_SHIFT 10 // log2(1024) voxel -> region shift
-#define REGION_CHUNK_SHIFT 5 
+#define REGION_DIM_SHIFT 10 // log2(2048) voxel -> region shift
+#define REGION_CHUNK_SHIFT 5 // log2(REGION_DIM_XZ / CHUNK_DIM)
 
 typedef enum {
 

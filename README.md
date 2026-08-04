@@ -55,6 +55,11 @@ the better reason i just wanted to make a raytracer because it seemed cool
 
 ![Ship2](res/images/ship2.png)
 
+![Aura](res/images/aura.png)
+
 ![Fog](res/images/fog.png)
 
-![Water](res/images/water.png)
+![Island](res/images/island.png)
+
+![night](res/images/shipsinnight.png)
+

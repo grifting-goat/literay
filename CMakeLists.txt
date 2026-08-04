@@ -36,15 +36,22 @@ if(NOT DXC_EXECUTABLE)
     message(FATAL_ERROR "dxc not found; install the Vulkan SDK or set VULKAN_SDK")
 endif()
 
-set(COMPUTE_SPV ${CMAKE_SOURCE_DIR}/shaders/compute.spv)
+set(COMPUTE_SPV_A ${CMAKE_SOURCE_DIR}/shaders/compute_a.spv)
+set(COMPUTE_SPV_B ${CMAKE_SOURCE_DIR}/shaders/compute_b.spv)
 
 # Complile shaders at build for now
 add_custom_command(
-    OUTPUT ${COMPUTE_SPV}
-    COMMAND ${DXC_EXECUTABLE} -spirv -T cs_6_0 -E main ${CMAKE_SOURCE_DIR}/shaders/shader.hlsl -Fo ${COMPUTE_SPV}
-    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/shader.hlsl
-    COMMENT "Compiling shader.hlsl to compute.spv"
+    OUTPUT ${COMPUTE_SPV_A}
+    COMMAND ${DXC_EXECUTABLE} -spirv -T cs_6_0 -E main ${CMAKE_SOURCE_DIR}/shaders/shaderA.hlsl -Fo ${COMPUTE_SPV_A}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/shaderA.hlsl
+    COMMENT "Compiling shaderA.hlsl to compute_a.spv"
+)
+add_custom_command(
+    OUTPUT ${COMPUTE_SPV_B}
+    COMMAND ${DXC_EXECUTABLE} -spirv -T cs_6_0 -E main ${CMAKE_SOURCE_DIR}/shaders/shaderB.hlsl -Fo ${COMPUTE_SPV_B}
+    DEPENDS ${CMAKE_SOURCE_DIR}/shaders/shaderB.hlsl
+    COMMENT "Compiling shaderB.hlsl to compute_b.spv"
 )
 
-add_custom_target(shaders DEPENDS ${COMPUTE_SPV})
+add_custom_target(shaders DEPENDS ${COMPUTE_SPV_A} ${COMPUTE_SPV_B})
 add_dependencies(literay shaders)
