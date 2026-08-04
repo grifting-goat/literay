@@ -155,6 +155,16 @@ float RandomValue(inout uint state) {
     return NextRandom(state) * 2.3283064365386963e-10f; // 1 / 2^32
 }
 
+static const float2 R2_STEP = float2(0.7548776662f, 0.5698402909f);
+
+float InterleavedGradientNoise(float2 px) {
+    return frac(52.9829189f * frac(dot(px, float2(0.06711056f, 0.00583715f))));
+}
+
+float2 NextBlueNoise2(inout float2 state) {
+    state = frac(state + R2_STEP);
+    return state;
+}
 
 uint HashVoxelCell(int3 cell) {
     uint seed = uint(cell.x) * 73856093u ^ uint(cell.y) * 19349663u ^ uint(cell.z) * 83492791u;
@@ -583,14 +593,18 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     uint pixelIndex = uint(pixel.y) * uint(pc._screen_size.x) + uint(pixel.x);
     uint rngState = pixelIndex + pc.frame_idx * 719393; //borrowed might want to update
 
+    float2 blueState = frac(float2(InterleavedGradientNoise(float2(pixel)), InterleavedGradientNoise(float2(pixel) + 71.0f))
+        + R2_STEP * float(pc.accumCount));
+
     float3 totalLight = 0.0f;
     uint bonus = 0;
 
     for (uint sample = 0; sample < RAYS_PER_PIXEL; sample++) {
-        float jitterX = RandomValue(rngState) - 0.5f;
-        float jitterY = RandomValue(rngState) - 0.5f;
-        float x = (float(pixel.x) + 0.5f + jitterX) / float(pc._screen_size.x);
-        float y = (float(pixel.y) + 0.5f + jitterY) / float(pc._screen_size.y);
+        // no accumulation happening this frame (camera just moved) -- a jittered offset would
+        // just shimmer with nothing to blend it against, so sample dead-center instead
+        float2 jitter = pc.accumCount > 1 ? NextBlueNoise2(blueState) - 0.5f : 0.0f;
+        float x = (float(pixel.x) + 0.5f + jitter.x) / float(pc._screen_size.x);
+        float y = (float(pixel.y) + 0.5f + jitter.y) / float(pc._screen_size.y);
 
         Ray r = CreateCameraRay(x, y);
         float3 voidColor = 0.0f;
@@ -692,43 +706,3 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     outputImage[pixel] = float4(accum, 1.0f);
 
 }
-
-// blue-noise sampling experiment (R2 low-discrepancy sequence, IGN-seeded, golden-ratio/R2
-
-// static const float2 R2_STEP = float2(0.7548776662f, 0.5698402909f);
-//
-// // per-pixel spatial seed; static across frames on its own, animated below via a
-// // golden-ratio rotation so it doesn't leave a fixed dither pattern baked into the image
-// float InterleavedGradientNoise(float2 px) {
-//     return frac(52.9829189f * frac(dot(px, float2(0.06711056f, 0.00583715f))));
-// }
-//
-// // blue-noise-flavoured replacement for RandomValue: a per-pixel IGN seed walked along a
-// // low-discrepancy sequence (one step per call = one sampling dimension), instead of an
-// // uncorrelated white-noise hash. Spreads error as blue noise in screen space rather than
-// // white noise, without needing a precomputed blue-noise texture.
-// float2 NextBlueNoise2(inout float2 state) {
-//     state = frac(state + R2_STEP);
-//     return state;
-// }
-//
-// // scalar draws (distScatter, specular decision, ...) just take one component of a 2D step
-// float NextBlueNoise(inout float2 state) {
-//     return NextBlueNoise2(state).x;
-// }
-//
-// float3 RandomDirectionBlue(inout float2 state) {
-//     // both components come from the SAME 2D step, not two sequential 1D draws -- that's
-//     // what keeps this from tracing a spiral (see R2_STEP comment above)
-//     float2 u = NextBlueNoise2(state);
-//     float z = 1.0f - 2.0f * u.x;
-//     float phi = 6.2831853f * u.y;
-//     float r = sqrt(max(0.0f, 1.0f - z * z));
-//     float s, c;
-//     sincos(phi, s, c);
-//     return float3(r * c, r * s, z);
-// }
-//
-// // seeding used in main() before the sample loop:
-// // float2 blueState = frac(float2(InterleavedGradientNoise(float2(pixel)), InterleavedGradientNoise(float2(pixel) + 71.0f))
-// //     + R2_STEP * float(pc.frame_idx % 4096u));

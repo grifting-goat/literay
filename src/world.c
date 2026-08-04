@@ -204,28 +204,46 @@ void region_spawn_generator(WorldGenerator* gen) {
     for (int x = -radius; x <= radius; x++) {
         for (int z = -radius; z <= radius; z++) {
             iVector_t region_coord = iVector_create(x, 0, z);
-            Region region = region_create(gen);
+            if (hmgeti(gen->regions, region_coord) != -1) { continue; } //edge manual place case
+
+            Region region = region_create(gen, region_coord);
             hmput(gen->regions, region_coord, region);
         }
     }
 }
 
-Region region_create(WorldGenerator* gen) {
+Region region_create(WorldGenerator* gen, iVector_t region_coord) {
     Region r = {0};
 
-    r.structure_count = 1;
+    uint32_t h = xz_hash((uint32_t)region_coord.x, (uint32_t)region_coord.z, gen->seed);
+
+    r.structure_count = h % 5; // up to 4 balls per region
     r.structures = calloc(r.structure_count, sizeof(Structure_t));
 
-    //for now copy structure_list[0] into region structure
-    memcpy(&r.structures[0], &gen->structure_list[3], sizeof(Structure_t));
+    for (uint32_t i = 0; i < r.structure_count; i++) {
+        h = xz_hash((uint32_t)region_coord.x, (uint32_t)region_coord.z, gen->seed + h + i);
+        r.structures[i].model = model_clone(&gen->structure_list[h % 2 ? RUBY_BALL : MIRROR_BALL].model);
 
-    r.structures[0].region_coords = uVector_create(200, 128, 200);
+        h = xz_hash((uint32_t)region_coord.x, (uint32_t)region_coord.z, gen->seed + ~h);
+        model_rotate_baked(&r.structures[i].model, (uint8_t)(h % 6), (uint8_t)((h >> 8) % 4));
+
+        h = xz_hash((uint32_t)region_coord.x, (uint32_t)region_coord.z, gen->seed ^ (h + i * 40503u));
+        uint32_t x = h % REGION_DIM_XZ;
+        uint32_t z = (~h) % REGION_DIM_XZ;
+        uint32_t y = 128 + ((h >> 8) % (WORLD_HEIGHT_LIMIT - 128));
+
+        r.structures[i].region_coords = uVector_create(x, y, z);
+    }
+
     return r;
 }
 
 
 
 void region_free(Region* r) {
+    for (uint32_t i = 0; i < r->structure_count; i++) {
+        model_free(&r->structures[i].model);
+    }
     free(r->structures);
     r->structures = NULL;
     r->structure_count = 0;
@@ -581,7 +599,7 @@ void world_destroy(World* wrld) {
 }
 
 
-void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin) {
+void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin, uint8_t rotation) {
     iVector_t region_coord = iVector_create(origin.x >> REGION_DIM_SHIFT, 0 , origin.z >> REGION_DIM_SHIFT);
     uVector_t region_rel_coord = uVector_create(
         (uint32_t)wrap_axis(origin.x, 1 << REGION_DIM_SHIFT),
@@ -591,7 +609,7 @@ void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin) 
     WorldGenerator* gen = &wrld->generator;
 
     if (hmgeti(gen->regions, region_coord) == -1) {
-        Region r = region_create(gen);
+        Region r = region_create(gen, region_coord);
         hmput(gen->regions, region_coord, r);
     }
 
@@ -600,10 +618,14 @@ void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin) 
 
     Structure_t* update = malloc((r->structure_count + 1) * sizeof(Structure_t));
     memcpy(update, r->structures, r->structure_count * sizeof(Structure_t));
-    memcpy(&update[r->structure_count], &gen->structure_list[type], sizeof(Structure_t));
     free(r->structures);
     r->structures = update;
 
+    uint8_t up_axis, cardinal_axis;
+    model_rotation_unpack(rotation, &up_axis, &cardinal_axis);
+
+    r->structures[r->structure_count].model = model_clone(&gen->structure_list[type].model);
+    model_rotate_baked(&r->structures[r->structure_count].model, up_axis, cardinal_axis);
     r->structures[r->structure_count].region_coords = region_rel_coord;
     r->structure_count++;
 }
@@ -695,6 +717,7 @@ void structure_list_create(Structure_t* structure_list) {
     structure_list[RUBY_BALL] = create_sphere_structure(30, RUBY);
     structure_list[LIGHT_CUBE] = create_cube_structure(light_cube_dim, YELLOW_LIGHT);
     structure_list[CASTLE].model = model_create_from_vox("./res/models/castle.vox", 0, 0, COPPER, false);
+    model_scale_baked(&structure_list[CASTLE].model, 8.0f);
     structure_list[STATUE].model = model_create_from_vox("./res/models/sculpt2.vox", 0, 0, MARBLE, false);
     structure_list[BOAT].model = model_create_from_vox("./res/models/boat.vox", 0, 0, AIR, true);
     structure_list[TREE].model = model_create_from_vox("./res/models/tree.vox", 0, 0, AIR, true);

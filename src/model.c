@@ -104,6 +104,13 @@ void model_free(Model_t* model) {
     model->size = 0;
 }
 
+Model_t model_clone(const Model_t* model) {
+    Model_t clone = *model;
+    clone.voxels = malloc(model->size);
+    memcpy(clone.voxels, model->voxels, model->size);
+    return clone;
+}
+
 
 /*
 baked models ops
@@ -201,6 +208,15 @@ void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis) 
     model->dimensions = uVector_create(new_dim[0], new_dim[1], new_dim[2]);
     model->up_axis = up_axis;
     model->cardinal_axis = cardinal_axis;
+}
+
+uint8_t model_rotation_pack(uint8_t up_axis, uint8_t cardinal_axis) {
+    return (up_axis & 0x7) | ((cardinal_axis & 0x3) << 3);
+}
+
+void model_rotation_unpack(uint8_t packed, uint8_t* up_axis, uint8_t* cardinal_axis) {
+    *up_axis = packed & 0x7;
+    *cardinal_axis = (packed >> 3) & 0x3;
 }
 
 

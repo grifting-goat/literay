@@ -45,18 +45,23 @@ int main() {
 
 	window_model_buffer_load(&window, model_instance_list);
 
+	
+
+
 
 	World wrld = world_create(67);
+
+	structure_manual_place(&wrld, CASTLE, iVector_create(-1580, 126, 540), model_rotation_pack(0, 0));
+	structure_manual_place(&wrld, BOAT, iVector_create(200, 123, 300), model_rotation_pack(0, 0));
+	structure_manual_place(&wrld, STATUE, iVector_create(1200, 184, 260), model_rotation_pack(0, 3));
+
+
 	world_chunk_gen_workers_start(&wrld);
 	printf("loading spawn...\n");
 	world_load_spawn_chunk(&wrld);
 	printf("spawn loaded.\n");
-
-
     window_world_spawn_load(&window, &wrld);
 
-	structure_manual_place(&wrld, CASTLE, iVector_create(10000, 128, -2000));
-	structure_manual_place(&wrld, BOAT, iVector_create(350, 124, 200));
 
 
 

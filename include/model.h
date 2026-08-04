@@ -35,8 +35,12 @@ Model_t model_create_from_vox(const char* path, uint8_t up_axis, uint8_t cardina
 Model_t model_create_from_custom(const char* path); //not implemented yet // custom file type
 
 void model_free(Model_t* model);
+Model_t model_clone(const Model_t* model); //deep copy, independent voxel buffer
 
 void model_scale_baked(Model_t* model, float scale); //scale the model (this alters the voxel data so no takies backsies)
 void model_rotate_baked(Model_t* model, uint8_t up_axis, uint8_t cardinal_axis);
+
+uint8_t model_rotation_pack(uint8_t up_axis, uint8_t cardinal_axis); //up_axis: 0-5, cardinal_axis: 0-3
+void model_rotation_unpack(uint8_t packed, uint8_t* up_axis, uint8_t* cardinal_axis);
 
 #endif //MODEL_H

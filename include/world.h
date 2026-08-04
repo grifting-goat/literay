@@ -116,7 +116,7 @@ typedef struct {
 WorldGenerator world_generator_create(uint32_t seed);
 void world_generator_free(WorldGenerator* gen);
 
-Region region_create(WorldGenerator* gen);
+Region region_create(WorldGenerator* gen, iVector_t region_coord);
 void region_spawn_generator(WorldGenerator* wrldgen); //hardcode structure spawning around spawn
 
 typedef struct {
@@ -164,6 +164,6 @@ int world_chunk_find_collision(World* wrld, iVector_t coord, int excludeIdx); //
 
 void world_destroy(World* wrld);
 
-void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin);
+void structure_manual_place(World* wrld, StructureTypes type, iVector_t origin, uint8_t rotation);
 
 #endif //WORLD_H
